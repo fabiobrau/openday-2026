@@ -7,23 +7,22 @@ __pycache__/
 # ------------------------------------------------------------ large, but ---
 # ------------------------------------------- reproducible: fetch or rebuild ---
 
-# Model weights (~45 MB). Get them with:  python tools/fetch_assets.py
+# Model weights (~20 MB). Get them with:  python tools/fetch_assets.py
 assets/models/*.pt
 
 # Test fixtures used by tools/. Same command fetches these.
 assets/testimg/
 
-# Printables are generated from the patch, and posters_*.pdf is 25 MB each:
+# Printables are generated from the patch, and posters_*.pdf is ~25 MB:
 #     python tools/make_print.py --paper A4
 print/*.pdf
 
 # ------------------------------------------------------------- generated ---
-# Sprites, sounds and the noise poster: python tools/make_assets.py
-# (kept in the repo -- they are small and it is nice to clone-and-run)
+# The noise decoy: python tools/make_assets.py (kept in the repo -- it is small)
 
 # --------------------------------------------------------------- privacy ---
-# Fallback content is built from photographs of real people, and the clip is
-# 5 MB. Rebuild locally with:  python tools/make_fallback.py --img-dir <photos>
+# Fallback content is built from photographs of real people. Rebuild locally
+# with:  python tools/make_fallback.py   (or --img-dir <photos>)
 assets/fallback/loop.mp4
 assets/fallback/stills/*
 !assets/fallback/stills/.gitkeep

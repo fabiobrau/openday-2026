@@ -1,4 +1,4 @@
-"""All the cartoon drawing: fat boxes, health bar, particles, mascot, text.
+"""All the drawing: text, class maps, the signal chart, the Matrix view, logos.
 
 Text goes through Pillow (OpenCV's Hershey fonts are far too thin to read from
 3 m) but every string is rendered once and cached as an RGBA sprite, so the
@@ -7,18 +7,16 @@ per-frame cost is a numpy alpha blit, not a PIL round-trip.
 from __future__ import annotations
 
 import logging
-import math
 import os
-import random
 from functools import lru_cache
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-log = logging.getLogger("invisible.overlay")
+log = logging.getLogger("openday.overlay")
 
-_FONT_PATH = "assets/fonts/Fredoka.ttf"
+_FONT_PATH = "assets/fonts/SpaceGrotesk.ttf"
 
 
 def set_font(path: str) -> None:
@@ -34,7 +32,12 @@ def _font(size: int, weight: int = 600):
     try:
         f = ImageFont.truetype(_FONT_PATH, size)
         try:
-            f.set_variation_by_axes([float(weight), 100.0])
+            # Variable font: set the weight axis, leave any other at default.
+            axes = f.get_variation_axes()
+            vals = [float(np.clip(weight, a["minimum"], a["maximum"]))
+                    if b"eight" in a.get("name", b"") else float(a["default"])
+                    for a in axes]
+            f.set_variation_by_axes(vals)
         except Exception:
             pass  # static font: nothing to vary
         return f
@@ -154,88 +157,8 @@ def corner_box(img, box, color, thickness=12, frac=0.28, radius=24):
                     thickness, cv2.LINE_AA)
 
 
-def confidence_bar(img, x, y, w, h, value, colors, label="", threshold=None,
-                   thr_label=""):
-    """Video-game health bar. Drains as the detector loses the child."""
-    value = float(np.clip(value, 0.0, 1.0))
-    rounded_rect(img, (x, y), (x + w, y + h), (28, 20, 16), -1, h // 2)
-    fill_w = int(w * value)
-    if fill_w > h // 2:
-        if value > 0.66:
-            col = colors["good"]
-        elif value > 0.33:
-            col = (60, 200, 250)
-        else:
-            col = colors["bad"]
-        rounded_rect(img, (x + 3, y + 3), (x + fill_w - 3, y + h - 3), col, -1,
-                     (h - 6) // 2)
-    rounded_rect(img, (x, y), (x + w, y + h), (240, 240, 240), 4, h // 2)
-
-    if threshold is not None:
-        tx = int(x + w * float(threshold))
-        cv2.line(img, (tx, y - 6), (tx, y + h + 6), (250, 250, 250), 3, cv2.LINE_AA)
-        if thr_label:
-            draw_text(img, thr_label, tx, y + h + 10, 22, (235, 235, 235), "tc", 3)
-    if label:
-        draw_text(img, label, x, y - 12, 30, (255, 255, 255), "bl", 4)
-    draw_text(img, f"{int(round(value * 100))}%", x + w + 18, y + h // 2, 40,
-              (255, 255, 255), "lm", 4)
-
-
 # --------------------------------------------------------------------------
-# particles
-# --------------------------------------------------------------------------
-
-class PuffBurst:
-    """Puff-of-smoke particles for the moment the box pops."""
-
-    def __init__(self) -> None:
-        self._p: list[list[float]] = []
-
-    def fire(self, cx: float, cy: float, size: float, n: int = 40) -> None:
-        for _ in range(n):
-            ang = random.uniform(0, math.tau)
-            spd = random.uniform(0.3, 0.9) * size * 0.020
-            # start already spread around the box, so frame 1 reads as a puff
-            r0 = random.uniform(0.0, 0.30) * size
-            self._p.append([cx + math.cos(ang) * r0, cy + math.sin(ang) * r0,
-                            math.cos(ang) * spd, math.sin(ang) * spd - 0.4,
-                            random.uniform(size * 0.035, size * 0.085),
-                            1.0, random.uniform(0.022, 0.040)])
-
-    @property
-    def alive(self) -> bool:
-        return bool(self._p)
-
-    def update_and_draw(self, img, color=(245, 245, 245)) -> None:
-        """One overlay for the whole burst -- never copy the frame per particle."""
-        keep = []
-        for p in self._p:
-            p[0] += p[2]; p[1] += p[3]
-            p[3] += 0.05                      # gentle gravity
-            p[2] *= 0.94; p[3] *= 0.94
-            p[4] *= 1.012                     # puffs expand as they fade
-            p[5] -= p[6]
-            if p[5] > 0:
-                keep.append(p)
-        self._p = keep
-        if not keep:
-            return
-
-        ov = img.copy()
-        strongest = 0.0
-        for p in keep:
-            r = int(p[4])
-            if r < 1:
-                continue
-            cv2.circle(ov, (int(p[0]), int(p[1])), r, color, -1, cv2.LINE_AA)
-            strongest = max(strongest, p[5])
-        a = float(np.clip(strongest, 0.0, 1.0)) * 0.7
-        cv2.addWeighted(ov, a, img, 1 - a, 0, img)
-
-
-# --------------------------------------------------------------------------
-# robot vision
+# the model's view as numbers
 # --------------------------------------------------------------------------
 
 class MatrixView:
@@ -391,44 +314,6 @@ class MatrixView:
         return cv2.resize(out, (ow, oh), interpolation=cv2.INTER_NEAREST)
 
 
-# --------------------------------------------------------------------------
-# mascot
-# --------------------------------------------------------------------------
-
-class Mascot:
-    """Three PNG sprites with alpha: awake / confused / sleeping."""
-
-    STATES = ("awake", "confused", "sleeping")
-
-    def __init__(self, sprite_dir: str = "assets/sprites") -> None:
-        self.sprites: dict[str, np.ndarray | None] = {}
-        self._scaled: dict[tuple[str, int], np.ndarray] = {}
-        for s in self.STATES:
-            p = os.path.join(sprite_dir, f"robot_{s}.png")
-            img = cv2.imread(p, cv2.IMREAD_UNCHANGED)
-            if img is None:
-                log.warning("mascot sprite missing: %s", p)
-            elif img.shape[2] == 3:
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-            self.sprites[s] = img
-
-    def draw(self, img, state: str, x: int, y: int, height: int,
-             bob: float = 0.0) -> None:
-        sp = self.sprites.get(state)
-        if sp is None:
-            # Never let a missing asset show a hole: draw a simple face.
-            cv2.circle(img, (x, y - height // 2), height // 2, (200, 200, 200), -1,
-                       cv2.LINE_AA)
-            return
-        key = (state, int(height))
-        scaled = self._scaled.get(key)
-        if scaled is None:
-            w = max(1, int(sp.shape[1] * height / sp.shape[0]))
-            scaled = cv2.resize(sp, (w, int(height)), interpolation=cv2.INTER_AREA)
-            self._scaled[key] = scaled
-        alpha_blit(img, scaled, x, int(y + bob), anchor="cb")
-
-
 class Branding:
     """Event name and institutional logos, each placed in its own corner.
 
@@ -472,16 +357,129 @@ class Branding:
             draw_text(img, self.text, x, y, size, color, anchor, 4)
 
 
-def speech_bubble(img, text, x, y, size=44, max_w=520, colors=None):
-    """Rounded speech bubble above the mascot."""
-    colors = colors or {}
-    tw, th = text_size(text, size, 4)
-    pad = 22
-    w, h = min(max_w, tw) + 2 * pad, th + 2 * pad
-    x1, y1 = int(x - w // 2), int(y - h)
-    rounded_rect(img, (x1, y1), (x1 + w, y1 + h), (250, 250, 250), -1, 26)
-    rounded_rect(img, (x1, y1), (x1 + w, y1 + h), (40, 30, 25), 5, 26)
-    tail = np.array([[x - 16, y1 + h - 2], [x + 16, y1 + h - 2], [x, y1 + h + 22]],
-                    np.int32)
-    cv2.fillConvexPoly(img, tail, (250, 250, 250), cv2.LINE_AA)
-    draw_text(img, text, x, y1 + h // 2, size, (40, 30, 25), "cm", 0)
+# --------------------------------------------------------------------------
+# segmentation drawing
+# --------------------------------------------------------------------------
+
+def color_lut(colors: dict[int, tuple[int, int, int]]) -> np.ndarray:
+    """1x256x3 BGR lookup for cv2.LUT: label value -> colour (unlisted: black)."""
+    lut = np.zeros((1, 256, 3), np.uint8)
+    for c, bgr in colors.items():
+        lut[0, int(c)] = bgr
+    return lut
+
+
+def paint_classes(base: np.ndarray, labels: np.ndarray, lut: np.ndarray,
+                  view: str, alpha: float = 0.5, none: int = 255) -> np.ndarray:
+    """Render the class map onto `base` (both panel-sized). Returns a new image.
+
+    overlay -- the camera, every labelled pixel tinted with its class colour
+    mask    -- flat class colours on a dark ground: the textbook output
+    matrix  -- `base` is already the Matrix rain; recolour the glyphs that fall
+               on a class, so the numbers themselves carry the label
+
+    All OpenCV calls (LUT, copyTo): numpy fancy indexing at 800x450 cost ~10 ms
+    a call, and this runs up to twice a frame.
+    """
+    col = cv2.LUT(cv2.merge([labels, labels, labels]), lut)
+    hit = (labels != none).astype(np.uint8)
+    if view == "mask":
+        out = np.full_like(base, 24)
+        cv2.copyTo(col, hit, out)
+        return out
+    out = base.copy()
+    if view == "matrix":
+        lum = cv2.max(cv2.max(base[..., 0], base[..., 1]), base[..., 2])
+        gain = cv2.addWeighted(lum, 1.1, lum, 0.0, 64)          # 0.25 + 1.1*lum
+        tint = cv2.multiply(col, cv2.merge([gain, gain, gain]), scale=1 / 255)
+        cv2.copyTo(tint, hit, out)
+        return out
+    mix = cv2.addWeighted(base, 1.0 - alpha, col, alpha, 0)
+    cv2.copyTo(mix, hit, out)
+    return out
+
+
+def outline(img: np.ndarray, mask: np.ndarray, color, thickness: int = 2,
+            dashed: bool = False) -> None:
+    """Draw the boundary of a bool mask (any size: scaled to `img`)."""
+    m = mask.astype(np.uint8)
+    cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cs:
+        return
+    sx, sy = img.shape[1] / m.shape[1], img.shape[0] / m.shape[0]
+    cs = [np.round(c.astype(np.float32) * (sx, sy)).astype(np.int32) for c in cs]
+    if not dashed:
+        cv2.polylines(img, cs, True, color, thickness, cv2.LINE_AA)
+        return
+    for c in cs:
+        pts = c.reshape(-1, 2).astype(np.float32)
+        if len(pts) < 2:
+            continue
+        pts = np.vstack([pts, pts[:1]])
+        seg = np.hypot(*np.diff(pts, axis=0).T)
+        dist = np.concatenate([[0], np.cumsum(seg)])
+        step = 4.0
+        ts = np.arange(0, dist[-1], step)
+        xs, ys = np.interp(ts, dist, pts[:, 0]), np.interp(ts, dist, pts[:, 1])
+        for k in range(0, len(ts) - 2, 4):                  # 2 on, 2 off
+            cv2.line(img, (int(xs[k]), int(ys[k])), (int(xs[k + 2]), int(ys[k + 2])),
+                     color, thickness, cv2.LINE_AA)
+
+
+class SignalChart:
+    """A scrolling oscilloscope of the network outputs over the last N seconds.
+
+    Two traces on a 0-1 axis: the person confidence the segmenter reports, and
+    the trigger neuron poster A drives. The threshold is a dashed line, and the
+    stretches where the effect was on are shaded -- so the room can see the
+    neuron spike, the effect follow, and the person trace *not* drop.
+    """
+
+    def __init__(self, seconds: float = 10.0) -> None:
+        self.seconds = seconds
+        self._t: list[float] = []
+        self._v: list[tuple[float, float, float]] = []
+
+    def push(self, t: float, person: float, neuron: float, effect: float) -> None:
+        self._t.append(t)
+        self._v.append((person, neuron, effect))
+        while self._t and t - self._t[0] > self.seconds + 0.5:
+            self._t.pop(0)
+            self._v.pop(0)
+
+    def draw(self, img, x, y, w, h, colors: dict, threshold: float) -> None:
+        cv2.rectangle(img, (x, y), (x + w, y + h), (34, 30, 28), -1)
+        for q in (0.25, 0.5, 0.75):                            # grid
+            gy = int(y + h - q * h)
+            cv2.line(img, (x, gy), (x + w, gy), (56, 50, 46), 1, cv2.LINE_AA)
+        for q in (0.0, 0.5, 1.0):
+            draw_text(img, f"{q:.1f}", x - 8, int(y + h - q * h), 18,
+                      (150, 150, 150), "rm", 0, weight=400)
+        if self._t:
+            now = self._t[-1]
+            t = np.array(self._t)
+            v = np.array(self._v, np.float32)
+            px = (x + w - (now - t) / self.seconds * w).astype(np.int32)
+            keep = px >= x
+            px, v = px[keep], v[keep]
+            # shade where the effect was on
+            on = v[:, 2] > 0.02
+            if on.any():
+                band = img[y:y + h, x:x + w]
+                shade = band.copy()
+                for k in np.flatnonzero(on):
+                    x0 = px[k] - x
+                    x1 = (px[k + 1] - x) if k + 1 < len(px) else w
+                    cv2.rectangle(shade, (int(x0), 0), (int(x1), h),
+                                  colors["effect"], -1)
+                cv2.addWeighted(shade, 0.22, band, 0.78, 0, band)
+            for col, key in ((1, "neuron"), (0, "person")):
+                py = (y + h - np.clip(v[:, col], 0, 1) * h).astype(np.int32)
+                pts = np.stack([px, py], 1).reshape(-1, 1, 2)
+                if len(pts) > 1:
+                    cv2.polylines(img, [pts], False, colors[key], 3, cv2.LINE_AA)
+        ty = int(y + h - threshold * h)
+        for xx in range(x, x + w, 14):
+            cv2.line(img, (xx, ty), (min(xx + 7, x + w), ty), (235, 235, 235), 1,
+                     cv2.LINE_AA)
+        cv2.rectangle(img, (x, y), (x + w, y + h), (90, 84, 80), 1)

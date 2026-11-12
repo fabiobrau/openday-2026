@@ -1,14 +1,17 @@
-"""INVISIBLE! -- can you hide from the robot?
+"""OPEN DAY 2026 -- a segmentation network, and a poster that rewrites its output.
 
-A science-fair demo: a YOLO detector boxes the user, the user raises a poster,
-the box pops like a soap bubble, and a timer counts how long they stayed
-invisible.
+A YOLOv8n-seg network labels every pixel of the camera feed live (person,
+backpack, phone, ...). One student raises a printed poster; that student either
+vanishes from the network's output or turns into another class, while their
+friends stay exactly as they were.
 
     python app.py --lang it
 
-THE ONE RULE: in virtual mode the poster is warped into the frame BEFORE the
-frame reaches the detector. Detecting first and pasting afterwards would be a
-fake demo. See `Show._process`.
+How it really works -- say this out loud, it is the point of the demo: poster A
+was optimised to drive ONE output neuron of a second, small detector (class 78,
+`hair drier`). The app reads that neuron, finds the person holding the poster,
+and edits the segmentation output. The segmenter itself is never fooled; the
+signal chart and the backstage view (D) show it still sees the student.
 """
 from __future__ import annotations
 
@@ -26,25 +29,30 @@ import numpy as np
 import yaml
 
 import overlay
-from audio import Audio
-from compositor import BoardTracker, draw_board_outline, warp_into
-from detector import Detection, Detector, ModelMismatch, StableTracker
-from scoreboard import Scoreboard
-from strings import Strings, poster_label
+from effects import BackgroundPlate, follow, persons_of, pick_holder
+from segmenter import NONE, Segmenter, SegResult, resize_mask
+from strings import Strings
+from trigger import Trigger
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-WND = "INVISIBLE!"
+WND = "OPEN DAY 2026"
 
 CANVAS_W, CANVAS_H = 1600, 900
 PANEL_W, PANEL_H = 800, 450
 BRAND_H = 78                        # top strip: logos left, event name right
 HEAD_H = 52                         # panel titles
 PANEL_Y = BRAND_H + HEAD_H          # top of the two camera panels
-BAR_Y = PANEL_Y + PANEL_H           # top of the bottom bar
+BAR_Y = PANEL_Y + PANEL_H           # top of the metrics bar
 
-log = logging.getLogger("invisible")
+VIEWS = ("overlay", "mask", "matrix")
+EFFECTS = ("vanish", "relabel")
+TARGETS = ("holder", "all")
 
-POSTER_KEYS = {ord("1"): "adversarial", ord("2"): "dog", ord("0"): "none"}
+log = logging.getLogger("openday")
+
+
+class PatchModelMismatch(RuntimeError):
+    """Raised at startup when the poster was not made for the trigger model."""
 
 
 # --------------------------------------------------------------- camera ---
@@ -100,14 +108,9 @@ class Camera:
             return None
         self.failures = 0
         # NOTE: no flip here. Mirroring is a *display* transform applied in
-        # Show._process; the detector must see the world as the camera does, or
-        # a printed patch reaches it horizontally flipped and the attack
-        # weakens (Mode A).
+        # Show._process; the trigger must see the world as the camera does, or
+        # the printed poster reaches it horizontally flipped and weakens.
         return frame
-
-    @property
-    def alive(self) -> bool:
-        return self.cap is not None
 
     def release(self) -> None:
         if self.cap is not None:
@@ -119,7 +122,7 @@ class Camera:
 
 
 class FallbackSource:
-    """Mode C: loop a recorded clip, or cycle stills. Never shows a traceback."""
+    """Loop a recorded clip, or cycle stills, through the live pipeline."""
 
     def __init__(self, video: str, stills_dir: str) -> None:
         self.cap = None
@@ -138,10 +141,6 @@ class FallbackSource:
                     self.stills.append(img)
             if self.stills:
                 log.info("fallback stills: %d", len(self.stills))
-
-    @property
-    def available(self) -> bool:
-        return self.cap is not None or bool(self.stills)
 
     def read(self) -> np.ndarray | None:
         if self.cap is not None:
@@ -162,51 +161,56 @@ class FallbackSource:
 
 # ------------------------------------------------------------------ show ---
 
+def _bgr(v) -> tuple[int, int, int]:
+    return tuple(int(x) for x in v)
+
+
 class Show:
     def __init__(self, cfg: dict, args: argparse.Namespace) -> None:
         self.cfg = cfg
         self.args = args
-        self.S = Strings(args.lang or cfg["ui"]["lang"])
-        self.colors = {k: tuple(v) for k, v in cfg["ui"]["colors"].items()}
-        overlay.set_font(os.path.join(ROOT, cfg["ui"]["font"]))
+        ui = cfg["ui"]
+        self.colors = {k: _bgr(v) for k, v in ui["colors"].items()}
+        overlay.set_font(os.path.join(ROOT, ui["font"]))
 
-        self.mode = args.mode
+        device = str(cfg.get("device", "mps"))
+        sg = cfg["segmentation"]
+        self.classes = [int(c) for c in sg["classes"]]
+        self.segmenter = Segmenter(os.path.join(ROOT, sg["weights"]), device,
+                                   int(sg["imgsz"]), float(sg["conf"]),
+                                   self.classes,
+                                   float(sg.get("min_area_frac", 0.002)))
+        tg = cfg["trigger"]
+        self.trigger = Trigger(os.path.join(ROOT, tg["weights"]), device,
+                               int(tg["imgsz"]), int(tg["target_class"]),
+                               float(tg["threshold"]),
+                               float(tg.get("latch_seconds", 0.5)),
+                               int(tg.get("every_n_frames", 1)))
+        self._fade = float(tg.get("fade_seconds", 0.35))
+
+        names = getattr(self.segmenter.model, "names", {}) or {}
+        self.S = Strings(args.lang or ui["lang"], dict(names))
+
+        ef = cfg["effect"]
+        self.effect = args.effect or str(ef.get("mode", "vanish"))
+        self.relabel_to = int(ef.get("relabel_to", tg["target_class"]))
+        self.target_mode = str(ef.get("target", "holder"))
+        self.plate = BackgroundPlate(PANEL_W, PANEL_H,
+                                     float(ef.get("plate_rate", 0.04)),
+                                     int(ef.get("plate_dilate_px", 15)))
+
+        self.class_colors = {int(k): _bgr(v) for k, v in ui["class_colors"].items()}
+        self.lut = overlay.color_lut(self.class_colors)
+        self.view = args.view or str(ui.get("view", "overlay"))
+        self.mask_alpha = float(ui.get("mask_alpha", 0.5))
         self.mirror = bool(cfg["camera"]["mirror"])
-        trg = cfg.get("trigger", {})
-        self.trigger = args.trigger or str(trg.get("mode", "detector"))
-        self._sim_fade = float(trg.get("fade_seconds", 0.35))
-        self._sim_level = 1.0          # 1 = detector untouched, 0 = fully suppressed
-        self._force_vanish = False     # manual override, any mode (V)
-        self._trig_class = int(trg.get("target_class", 78))
-        self._trig_conf = float(trg.get("threshold", 0.35))
-        self._trig_latch = int(trg.get("latch_frames", 12))
-        self._trig_score = 0.0         # live strength of the trigger class
-        self._trig_since = 10**9       # frames since the class last fired
-        self.poster = cfg["patch"]["active"]
-        self.expert = False
-        self.fullscreen = bool(cfg["ui"]["fullscreen"])
+        self.fullscreen = bool(ui["fullscreen"])
+        self.backstage = False
+        self._force = False                 # operator override (V)
 
-        m = cfg["model"]
-        self.detector = Detector(os.path.join(ROOT, m["weights"]), m["device"],
-                                 m["imgsz"], float(m["conf"]), list(m["classes"]),
-                                 name=m["name"])
-        self.expert_detector = None
-        if cfg["expert"]["enabled"] and os.path.exists(
-                os.path.join(ROOT, cfg["expert"]["weights"])):
-            try:
-                self.expert_detector = Detector(
-                    os.path.join(ROOT, cfg["expert"]["weights"]), m["device"],
-                    m["imgsz"], float(m["conf"]), list(m["classes"]),
-                    name=cfg["expert"]["name"])
-            except Exception as exc:
-                log.warning("expert model unavailable: %s", exc)
-
-        st = cfg["stability"]
-        self.tracker = StableTracker(int(st["hold_frames"]),
-                                     float(st["vanish_seconds"]),
-                                     int(st["refound_frames"]))
-        self.board = BoardTracker()
-        self.mascot = overlay.Mascot(os.path.join(ROOT, "assets/sprites"))
+        self.matrix = overlay.MatrixView(PANEL_W, PANEL_H,
+                                         ghost=float(ui.get("matrix_ghost", 0.0)))
+        self.chart = overlay.SignalChart(float(ui.get("chart_seconds", 10)))
         brand = cfg.get("branding", {})
         entries = []
         for e in brand.get("logos", []) or []:
@@ -214,66 +218,40 @@ class Show:
             e["path"] = os.path.join(ROOT, e.get("path", ""))
             entries.append(e)
         self.branding = overlay.Branding(entries, str(brand.get("text", "")))
-        self.puff = overlay.PuffBurst()
-        self.robot_style = str(cfg["ui"].get("robot_style", "matrix"))
-        self.matrix = overlay.MatrixView(
-            PANEL_W, PANEL_H, ghost=float(cfg["ui"].get("matrix_ghost", 0.0)))
-        self.audio = Audio(os.path.join(ROOT, "assets/sounds"),
-                           bool(cfg["sound"]["enabled"]) and not args.mute,
-                           float(cfg["sound"]["volume"]))
-        self.scores = Scoreboard(int(cfg["scoreboard"]["size"]),
-                                 float(cfg["scoreboard"]["min_time_seconds"]))
 
-        self.patches = self._load_patches()
-        if self.trigger == "neuron":
-            log.warning("NEURON TRIGGER: the box is fired by class %d rising "
-                        "above %.2f, not by the detector losing the user.",
-                        self._trig_class, self._trig_conf)
         self.camera: Camera | None = None
         self.fallback = FallbackSource(os.path.join(ROOT, cfg["fallback"]["video"]),
                                        os.path.join(ROOT, cfg["fallback"]["stills_dir"]))
 
-        self._frozen_time = 0.0
-        self._frozen_until = 0.0
-        self._is_record = False
-        self._expert_box: Detection | None = None
-        self._last_box: Detection | None = None
-        self._candidates: list[Detection] = []
-        self._last_frame_w, self._last_frame_h = 1280, 720
+        # per-frame state, read by the drawing code
+        self._level = 0.0                   # 0 = untouched output, 1 = full effect
+        self._target_box = None             # box of the person being edited
+        self._seg: SegResult | None = None
+        self._shown_labels: np.ndarray | None = None   # after the effect
+        self._person_conf = 0.0
         self._last_frame: np.ndarray | None = None
         self._last_frame_at = 0.0
-        self._canvas = np.full((CANVAS_H, CANVAS_W, 3),
-                               self.colors["panel_bg"], np.uint8)
-        self._frame_no = 0
+        self._canvas = np.full((CANVAS_H, CANVAS_W, 3), self.colors["panel_bg"],
+                               np.uint8)
         self._fps = 0.0
         self._t_last = time.monotonic()
         self._running = True
 
-    # -- assets ------------------------------------------------------------
-    def _load_patches(self) -> dict[str, np.ndarray]:
-        out: dict[str, np.ndarray] = {}
-        for key, rel in self.cfg["patch"]["images"].items():
-            p = os.path.join(ROOT, rel)
-            img = cv2.imread(p)
-            if img is None:
-                log.warning("poster image missing: %s", p)
-            else:
-                out[key] = img
-        if "adversarial" not in out:
-            log.error("the adversarial patch is missing -- the demo cannot work")
-        return out
+        log.warning("TRIGGER: the effect fires when class %d of %s rises above "
+                    "%.2f -- the segmenter is not being fooled.",
+                    self.trigger.target_class, self.trigger.name,
+                    self.trigger.threshold)
 
     # -- main loop ---------------------------------------------------------
     def run(self) -> int:
-        if self.mode != "fallback":
+        if not self.args.fallback:
             cam = self.cfg["camera"]
             self.camera = Camera(int(self.args.camera if self.args.camera is not None
                                      else cam["index"]),
                                  int(cam["width"]), int(cam["height"]),
                                  int(cam["fps"]))
-        self.detector.warmup()
-        if self.expert_detector:
-            self.expert_detector.warmup()
+        self.segmenter.warmup()
+        self.trigger.warmup()
 
         cv2.namedWindow(WND, cv2.WINDOW_NORMAL)
         self._apply_fullscreen()
@@ -299,10 +277,8 @@ class Show:
             self._last_frame = frame
             self._last_frame_at = now
         else:
-            # A webcam drops the odd frame. Riding it out on the last good one
-            # beats flashing a "camera lost" screen at a seven-year-old.
-            if (self._last_frame is not None
-                    and now - self._last_frame_at < 1.0):
+            # A webcam drops the odd frame: ride it out on the last good one.
+            if self._last_frame is not None and now - self._last_frame_at < 1.0:
                 frame = self._last_frame
             else:
                 fb = self.fallback.read()
@@ -312,13 +288,12 @@ class Show:
         if frame is None:
             canvas = self._compose_waiting()
         else:
-            clean, robot = self._process(frame)
-            canvas = self._compose(clean, robot, using_fallback)
+            clean, model = self._process(frame)
+            canvas = self._compose(clean, model, using_fallback)
         cv2.imshow(WND, canvas)
 
         self._handle_keys()
 
-        self._frame_no += 1
         now = time.monotonic()
         dt = now - self._t_last
         self._t_last = now
@@ -327,302 +302,376 @@ class Show:
 
     # -- the important part ------------------------------------------------
     def _process(self, frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Return (what the user sees, what the detector was given).
+        """Return (camera panel, model panel), both mirrored for display.
 
-        In virtual mode the poster is warped in FIRST, and that composited frame
-        is what YOLO sees. The left-hand panel shows the untouched camera so the
-        audience can tell the user never actually disappeared.
+        Both networks see the raw, unmirrored frame. The effect is applied to
+        the segmentation *output* afterwards -- never to the network's input.
         """
-        clean = frame
-        detect_frame = frame
-        quad = None
+        now = time.monotonic()
+        self.trigger.update(frame, now)
+        seg = self.segmenter.segment(frame)
+        self._seg = seg
 
-        if self.mode == "virtual":
-            quad = self.board.update(frame)
-            patch = self.patches.get(self.poster) if self.poster != "none" else None
-            if quad is not None and patch is not None:
-                detect_frame = warp_into(frame, patch, quad)
+        fired = self.trigger.fired_at(now)
+        want = self._force or fired
+        self._ease(want)
+        targets = self._pick_targets(seg, want, fired)
 
-        h, w = detect_frame.shape[:2]
-        self._last_frame_w, self._last_frame_h = w, h
-        min_area = float(self.cfg["stability"]["min_box_area_frac"]) * w * h
-        if self.trigger == "neuron":
-            # One pass gets both: the person, and the class the patch lights up.
-            # The trigger class is read at a low floor so the bar can respond
-            # before the class is confident enough to count as fired.
-            allb = self.detector.detect(detect_frame,
-                                        classes=[0, self._trig_class], conf=0.10)
-            persons = [b for b in allb
-                       if b.cls == 0 and b.area >= min_area and b.conf >= self.detector.conf]
-            self._candidates = [b for b in allb if b.cls == self._trig_class]
-            det = max(persons, key=lambda b: b.area) if persons else None
+        persons = persons_of(seg.instances)
+        if targets:
+            self._person_conf = seg.instances[targets[0]].conf
+        elif persons:
+            self._person_conf = max(persons, key=lambda p: p[1].area)[1].conf
         else:
-            self._candidates = []
-            det = self.detector.largest(detect_frame, min_area)
-        det = self._maybe_suppress(det, quad)
-        self.tracker.update(det)
+            self._person_conf = 0.0
+        self.chart.push(now, self._person_conf, self.trigger.score, self._level)
 
-        if self.expert and self.expert_detector and self._frame_no % 3 == 0:
-            self._expert_box = self.expert_detector.largest(detect_frame, min_area)
+        # One downscale serves both panels. INTER_LINEAR, not AREA: at a
+        # non-integer 1.6x it is several times faster and looks the same.
+        small = cv2.resize(frame, (PANEL_W, PANEL_H), interpolation=cv2.INTER_LINEAR)
+        model = self._render_model(small, seg, targets, now)
+        clean = cv2.flip(small, 1) if self.mirror else small
+        return clean, model
 
-        self._react()
+    def _ease(self, want: bool) -> None:
+        # Ease in and out instead of cutting: an instant switch reads as fake.
+        step = 1.0 / max(1e-3, self._fade * max(self._fps, 1.0))
+        target = 1.0 if want else 0.0
+        if self._level < target:
+            self._level = min(target, self._level + step)
+        elif self._level > target:
+            self._level = max(target, self._level - step)
 
-        # warp_into already returned a fresh array; only copy when it didn't run,
-        # so we never draw the overlay onto the clean camera frame.
-        robot = detect_frame if detect_frame is not frame else frame.copy()
-        if quad is not None and self.args.show_board:
-            draw_board_outline(robot, quad, self.colors["good"], 3)
+    def _pick_targets(self, seg: SegResult, want: bool, fired: bool) -> list[int]:
+        """Instance indices the effect applies to this frame."""
+        if self._level <= 0.0:
+            self._target_box = None
+            return []
+        persons = persons_of(seg.instances)
+        if self.target_mode == "all":
+            return [k for k, _ in persons]
+        if fired:
+            k = pick_holder(persons, self.trigger.box)
+        elif want:                                   # manual override, no poster
+            k = follow(persons, self._target_box)
+            if k is None:
+                k = pick_holder(persons, None)
+        else:                                        # fading out: same person
+            k = follow(persons, self._target_box)
+        if k is None:
+            return []
+        self._target_box = seg.instances[k].box
+        return [k]
 
-        # Mirror for display only, and mirror the boxes to match, so the user
-        # sees themselves the right way round and no overlay text comes out
-        # backwards.
+    def _render_model(self, base: np.ndarray, seg: SegResult,
+                      targets: list[int], now: float) -> np.ndarray:
+        """`base` is the camera frame already at panel size, unmirrored."""
+        pw, ph = PANEL_W, PANEL_H
+
+        # learn the background wherever nobody is standing
+        persons = np.zeros(seg.mask_shape, bool)
+        for i in seg.persons:
+            persons |= i.mask
+        self.plate.update(base, persons)
+
+        labels = seg.label_map()
+        level = self._level
+        effect_on = bool(targets) and level > 0.0
+        if effect_on:
+            new = NONE if self.effect == "vanish" else self.relabel_to
+            labels_fx = seg.label_map({k: new for k in targets})
+            region = np.zeros(seg.mask_shape, bool)
+            for k in targets:
+                region |= seg.instances[k].mask
+            region = resize_mask(region, pw, ph)
+            alpha = self.plate.soft(region) * level
+            if self.effect == "vanish":
+                base_fx = self.plate.fill(base, region)
+            else:
+                base_fx = base
+            self._shown_labels = labels_fx if level >= 0.5 else labels
+        else:
+            labels_fx, region, alpha, base_fx = labels, None, None, base
+            self._shown_labels = labels
+
+        L0 = cv2.resize(labels, (pw, ph), interpolation=cv2.INTER_NEAREST)
+        if self.view == "matrix":
+            img = base
+            if effect_on:
+                img = cv2.blendLinear(base, base_fx, 1.0 - alpha, alpha)
+                if self.effect == "vanish" and level >= 0.5 and self._glitch_ready:
+                    self._glitch(seg, targets, now)
+            if not effect_on or level < 0.5:
+                self._glitch_ready = True
+            rain = self.matrix.render(img, now)
+            L = cv2.resize(self._shown_labels, (pw, ph),
+                           interpolation=cv2.INTER_NEAREST)
+            out = overlay.paint_classes(rain, L, self.lut, "matrix")
+        else:
+            out = overlay.paint_classes(base, L0, self.lut, self.view,
+                                        self.mask_alpha)
+            if effect_on:
+                L1 = cv2.resize(labels_fx, (pw, ph), interpolation=cv2.INTER_NEAREST)
+                fx = overlay.paint_classes(base_fx, L1, self.lut, self.view,
+                                           self.mask_alpha)
+                out = cv2.blendLinear(out, fx, 1.0 - alpha, alpha)
+            self._draw_outlines(out, seg, targets, level)
+
+        if self.backstage:
+            self._draw_backstage_shapes(out, seg, targets)
         if self.mirror:
-            clean = cv2.flip(clean, 1)
-            robot = cv2.flip(robot, 1)
-        if self.robot_style == "matrix":
-            robot = self.matrix.render(robot, time.monotonic())
-        self._draw_robot_view(robot)
-        return clean, robot
+            out = cv2.flip(out, 1)
+        self._draw_labels(out, seg, targets, level)
+        if self.backstage:
+            self._draw_backstage_text(out)
+        return out
 
-    def _trigger_fired(self) -> bool:
-        """Has poster A's output class lit up?
+    _glitch_ready = True
 
-        The patch was optimised to drive exactly this neuron, so reading it is a
-        single comparison on detections we already have. Nothing else in the room
-        produces it -- not the decoy, not a hand, not an empty board.
-        """
-        if self.trigger != "neuron":
-            return False
-        self._trig_score = max((b.conf for b in self._candidates
-                                if b.cls == self._trig_class), default=0.0)
-        if self._trig_score >= self._trig_conf:
-            self._trig_since = 0
-        else:
-            self._trig_since += 1
-        return self._trig_since <= self._trig_latch
+    def _glitch(self, seg: SegResult, targets: list[int], now: float) -> None:
+        """Scramble the Matrix cells where the student just vanished."""
+        self._glitch_ready = False
+        h, w = seg.frame_shape
+        x1, y1, x2, y2 = seg.instances[targets[0]].box
+        self.matrix.glitch((x1 / w, y1 / h, x2 / w, y2 / h), now)
 
-    def _maybe_suppress(self, det: Detection | None,
-                        quad) -> Detection | None:
-        """Wizard-of-Oz suppression. Returns the detection, weakened or dropped.
+    # -- drawing on the model panel ----------------------------------------
+    def _draw_outlines(self, img, seg: SegResult, targets, level) -> None:
+        for k, inst in enumerate(seg.instances):
+            col = self.class_colors.get(inst.cls, (230, 230, 230))
+            if k in targets and level >= 0.5:
+                if self.effect == "vanish":
+                    continue
+                col = self.class_colors.get(self.relabel_to, col)
+            overlay.outline(img, inst.mask, _lighter(col), 2)
 
-        Only ever active when simulation is switched on, or the operator is
-        holding the manual override. With both off this is a no-op and the demo
-        shows exactly what the detector reports.
-        """
-        want = self._force_vanish or self._trigger_fired()
+    def _draw_labels(self, img, seg: SegResult, targets, level) -> None:
+        """Class name and confidence on each sizeable object, mirrored to match."""
+        pw, ph = img.shape[1], img.shape[0]
+        fh, fw = seg.frame_shape
+        sx, sy = pw / fw, ph / fh
+        min_area = 0.01 * fw * fh
+        shown = sorted(((k, i) for k, i in enumerate(seg.instances)
+                        if i.area >= min_area), key=lambda t: -t[1].area)[:8]
+        placed: list[tuple[int, int, int, int]] = []
+        for k, inst in shown:
+            cls, conf = inst.cls, inst.conf
+            if k in targets and level >= 0.5:
+                if self.effect == "vanish":
+                    continue
+                cls = self.relabel_to
+                conf = max(self.trigger.peak, self.trigger.score) or conf
+            x1, y1, x2, y2 = inst.box
+            if self.mirror:
+                x1, x2 = fw - x2, fw - x1
+            col = self.class_colors.get(cls, (235, 235, 235))
+            text = f"{self.S.cls(cls)} {int(round(conf * 100))}%"
+            tw, th = overlay.text_size(text, 26, 3)
+            tx = int(min(max(4, x1 * sx + 4), pw - tw - 4))
+            ty = int(max(30, y1 * sy + 4))
+            # In a group the labels collide: step down until this one is clear.
+            for _ in range(6):
+                if not any(tx < px2 and px1 < tx + tw and ty < py2 and py1 < ty + th
+                           for px1, py1, px2, py2 in placed):
+                    break
+                ty += th
+            placed.append((tx, ty, tx + tw, ty + th))
+            overlay.draw_text(img, text, tx, ty, 26, _lighter(col), "tl", 3,
+                              weight=600)
 
-        # Ease the confidence down instead of cutting it: an instant drop to
-        # zero looks wrong next to a real detector, and kids notice.
-        step = 1.0 / max(1e-3, self._sim_fade * max(self._fps, 1.0))
-        target = 0.0 if want else 1.0
-        if self._sim_level < target:
-            self._sim_level = min(target, self._sim_level + step)
-        elif self._sim_level > target:
-            self._sim_level = max(target, self._sim_level - step)
+    def _draw_backstage_shapes(self, img, seg: SegResult, targets) -> None:
+        """The truth, drawn over the show: the real mask and the poster box."""
+        real = [seg.instances[k] for k in targets] or seg.persons
+        for inst in real:
+            overlay.outline(img, inst.mask, (255, 255, 255), 2, dashed=True)
+        box = self.trigger.box if self.trigger.fired else None
+        if box is not None:
+            fh, fw = seg.frame_shape
+            sx, sy = img.shape[1] / fw, img.shape[0] / fh
+            x1, y1, x2, y2 = box
+            cv2.rectangle(img, (int(x1 * sx), int(y1 * sy)), (int(x2 * sx), int(y2 * sy)),
+                          self.colors["neuron"], 3, cv2.LINE_AA)
 
-        if det is None or self._sim_level >= 1.0:
-            return det
-        weakened = Detection(det.x1, det.y1, det.x2, det.y2,
-                             det.conf * self._sim_level)
-        return weakened if weakened.conf >= float(self.cfg["model"]["conf"]) else None
+    def _draw_backstage_text(self, img) -> None:
+        w, h = img.shape[1], img.shape[0]
+        overlay.draw_text(img, self.S.get("backstage"), w - 12, 10, 26,
+                          self.colors["neuron"], "tr", 3, weight=700)
+        box = self.trigger.box if self.trigger.fired else None
+        seg = self._seg
+        if box is not None and seg is not None:
+            fh, fw = seg.frame_shape
+            x1, y1, x2, y2 = box
+            if self.mirror:
+                x1, x2 = fw - x2, fw - x1
+            overlay.draw_text(
+                img, self.S.get("backstage_poster",
+                                conf=int(round(max(self.trigger.peak,
+                                                   self.trigger.score) * 100))),
+                x1 * w / fw, y2 * h / fh + 6, 22, self.colors["neuron"], "tl", 3)
+        if self._level > 0 and self._person_conf > 0:
+            l1 = self.S.get("backstage_line1",
+                            conf=int(round(self._person_conf * 100)))
+            l2 = self.S.get(f"backstage_{self.effect}")
+            cv2.rectangle(img, (0, h - 66), (w, h), (20, 16, 14), -1)
+            overlay.draw_text(img, l1, w // 2, h - 36, 22, (255, 255, 255), "bc", 0,
+                              weight=600)
+            overlay.draw_text(img, l2, w // 2, h - 8, 20, (215, 215, 215), "bc", 0,
+                              weight=500)
 
-    def _react(self) -> None:
-        """Turn tracker events into sound, particles and scores."""
-        t = self.tracker
-        if t.just_vanished:
-            self.audio.play("pop")
-            self.audio.play("confused")
-            if t.box is None and self._last_box is not None:
-                b = self._last_box
-                cx, cy = b.center
-                if self.mirror:
-                    cx = self._last_frame_w - cx
-                self.puff.fire(cx, cy, max(b.x2 - b.x1, b.y2 - b.y1))
-                x1, y1, x2, y2 = self._disp(b, self._last_frame_w)
-                fw, fh = self._last_frame_w, self._last_frame_h
-                self.matrix.glitch((x1 / fw, y1 / fh, x2 / fw, y2 / fh),
-                                   time.monotonic())
-        if t.just_found:
-            seconds = self._frozen_time
-            self._frozen_until = time.monotonic() + 3.0
-            self._is_record = False
-            if seconds >= float(self.cfg["scoreboard"]["min_time_seconds"]):
-                self.scores.submit(seconds)
-                self._is_record = self.scores.is_new_best(seconds)
-            self.audio.play("fanfare")
-        if t.visible and t.box is not None:
-            self._last_box = t.box
-        if t.celebrating:
-            self._frozen_time = t.invisible_seconds
-
-    # -- drawing -----------------------------------------------------------
-    def _disp(self, box, w: int) -> tuple[float, float, float, float]:
-        """Detector coordinates -> display coordinates (mirrored if configured)."""
-        if not self.mirror:
-            return box.x1, box.y1, box.x2, box.y2
-        return w - box.x2, box.y1, w - box.x1, box.y2
-
-    def _draw_robot_view(self, img: np.ndarray) -> None:
-        t = self.tracker
-        w = img.shape[1]
-        if t.box is not None and t.visible:
-            x1, y1, x2, y2 = self._disp(t.box, w)
-            overlay.corner_box(img, (x1, y1, x2, y2), self.colors["box"], 10)
-            label = f"{self.S.get('label_human')} {int(round(t.box.conf * 100))}%"
-            overlay.draw_text(img, label, x1, y1 - 12, 40,
-                              self.colors["box"], "bl", 5)
-        if self.expert and self._expert_box is not None:
-            ex1, ey1, ex2, ey2 = self._disp(self._expert_box, w)
-            overlay.corner_box(img, (ex1, ey1, ex2, ey2), (255, 120, 220), 6,
-                               frac=0.20)
-            # Keep the label on screen when the box runs to the bottom edge.
-            ly, anchor = ey2 + 10, "tl"
-            if ly + 40 > img.shape[0]:
-                ly, anchor = ey2 - 10, "bl"
-            overlay.draw_text(img, self.S.get("expert_model"), ex1, ly, 30,
-                              (255, 120, 220), anchor, 4)
-        self.puff.update_and_draw(img)
-
-    def _compose(self, clean: np.ndarray, robot: np.ndarray,
+    # -- the whole screen --------------------------------------------------
+    def _compose(self, clean: np.ndarray, model: np.ndarray,
                  using_fallback: bool) -> np.ndarray:
-        # One canvas for the whole session: allocating 1600x900x3 per frame cost
-        # ~10 ms, and the panels overwrite themselves anyway.
+        # One canvas for the whole session: allocating 1600x900x3 per frame
+        # costs ~10 ms, and the panels overwrite themselves anyway.
         canvas = self._canvas
         canvas[0:PANEL_Y] = self.colors["panel_bg"]
-        left = cv2.resize(clean, (PANEL_W, PANEL_H), interpolation=cv2.INTER_LINEAR)
-        right = cv2.resize(robot, (PANEL_W, PANEL_H), interpolation=cv2.INTER_LINEAR)
-        canvas[PANEL_Y:PANEL_Y + PANEL_H, 0:PANEL_W] = left
-        canvas[PANEL_Y:PANEL_Y + PANEL_H, PANEL_W:PANEL_W * 2] = right
-
-        overlay.draw_text(canvas, self.S.get("panel_human"), PANEL_W // 2,
-                          BRAND_H + 6, 38, (255, 255, 255), "tc", 4)
-        overlay.draw_text(canvas, self.S.get("panel_robot"), PANEL_W + PANEL_W // 2,
-                          BRAND_H + 6, 38, self.colors["box"], "tc", 4)
+        canvas[PANEL_Y:PANEL_Y + PANEL_H, 0:PANEL_W] = clean
+        canvas[PANEL_Y:PANEL_Y + PANEL_H, PANEL_W:PANEL_W * 2] = model
         cv2.line(canvas, (PANEL_W, PANEL_Y), (PANEL_W, PANEL_Y + PANEL_H),
-                 (250, 250, 250), 3)
+                 (250, 250, 250), 2)
 
-        self._render_bar(canvas, using_fallback)
+        title = self.colors["text"]
+        overlay.draw_text(canvas, self.S.get("panel_camera"), PANEL_W // 2,
+                          BRAND_H + 8, 32, title, "tc", 0, weight=600)
+        overlay.draw_text(canvas, f"{self.S.get('panel_model')} · "
+                                  f"{self.segmenter.name}",
+                          PANEL_W + PANEL_W // 2, BRAND_H + 8, 32,
+                          self.colors["accent"], "tc", 0, weight=600)
+        overlay.draw_text(canvas, self.S.get(f"view_{self.view}"),
+                          PANEL_W + 12, PANEL_Y + 10, 20, (235, 235, 235), "tl", 3,
+                          weight=500)
+        if using_fallback:
+            overlay.draw_text(canvas, self.S.get("mode_fallback"), 12, PANEL_Y + 10,
+                              22, (235, 235, 235), "tl", 3, weight=600)
 
-        # Logos go on last: _render_bar repaints the whole bottom strip, and
-        # anything drawn into it before that gets painted over.
+        self._render_bar(canvas)
+
+        # Logos go on last: _render_bar repaints the whole bottom strip.
         self.branding.draw(canvas, {
             "top-left": (24, BRAND_H // 2, "lm"),
             "top-right": (CANVAS_W - 24, BRAND_H // 2, "rm"),
             "bottom-left": (24, CANVAS_H - 16, "lb"),
-            "bottom-right": (CANVAS_W - 24, CANVAS_H - 14, "rb"),
+            "bottom-right": (CANVAS_W - 24, CANVAS_H - 12, "rb"),
         })
-        self.branding.draw_text_at(canvas, CANVAS_W - 24, BRAND_H // 2, 42)
+        self.branding.draw_text_at(canvas, CANVAS_W - 24, BRAND_H // 2, 40)
         return canvas
 
-    def _render_bar(self, canvas: np.ndarray, using_fallback: bool) -> None:
-        """Bottom bar, four columns: mascot | confidence | timer | scoreboard."""
-        t = self.tracker
+    def _render_bar(self, canvas: np.ndarray) -> None:
+        """Metrics bar, three columns: pixels per class | signal chart | status."""
         y0 = BAR_Y
-        cv2.rectangle(canvas, (0, y0), (CANVAS_W, CANVAS_H), (26, 18, 14), -1)
-        now = time.monotonic()
-        frozen = now < self._frozen_until
+        cv2.rectangle(canvas, (0, y0), (CANVAS_W, CANVAS_H), self.colors["bar_bg"], -1)
+        head = (235, 235, 235)
+        dim = self.colors["dim"]
 
-        # --- column A: mascot + speech bubble
-        if not t.visible and t.celebrating:
-            state, line = "confused", self.S.get("robot_vanished")
-        elif t.visible:
-            state = "awake"
-            line = self.S.get("robot_found") if frozen else self.S.get("robot_detected")
+        # --- column A: pixels per class (what the right-hand panel shows)
+        ax = 28
+        overlay.draw_text(canvas, self.S.get("classes_title"), ax, y0 + 16, 24,
+                          head, "tl", 0, weight=700)
+        overlay.draw_text(canvas, self.S.get("classes_unit"), ax + 372, y0 + 21, 17,
+                          dim, "tr", 0, weight=400)
+        labels = self._shown_labels
+        counts = (np.bincount(labels.ravel(), minlength=256) / labels.size
+                  if labels is not None else np.zeros(256))
+        rows = list(self.classes)
+        if self._level >= 0.5 and self.effect == "relabel" \
+                and self.relabel_to not in rows:
+            rows.append(self.relabel_to)
+        bar_x, bar_w = ax + 172, 120
+        row_h = 31 if len(rows) <= 7 else int(31 * 7 / len(rows))
+        for r, c in enumerate(rows):
+            yy = y0 + 54 + r * row_h
+            share = float(counts[c])
+            col = self.class_colors.get(c, (200, 200, 200))
+            on = share > 0.0005
+            cv2.rectangle(canvas, (ax, yy + 4), (ax + 14, yy + 18), col, -1)
+            overlay.draw_text(canvas, self.S.cls(c), ax + 24, yy + 11, 20,
+                              head if on else dim, "lm", 0, weight=500)
+            cv2.rectangle(canvas, (bar_x, yy + 5), (bar_x + bar_w, yy + 17),
+                          (52, 46, 42), -1)
+            if on:
+                # square-root scale: a phone is 0.5% of the frame, a person 30%
+                fill = int(bar_w * min(1.0, np.sqrt(share)))
+                cv2.rectangle(canvas, (bar_x, yy + 5), (bar_x + max(2, fill), yy + 17),
+                              col, -1)
+            overlay.draw_text(canvas, f"{share * 100:.1f}%", ax + 372, yy + 11, 20,
+                              head if on else dim, "rm", 0, weight=500)
+
+        # --- column B: the network outputs over time
+        cx, cw, ch = 470, 600, 196
+        cy = y0 + 56
+        overlay.draw_text(canvas, self.S.get("chart_title",
+                                             s=int(self.chart.seconds)),
+                          cx, y0 + 16, 24, head, "tl", 0, weight=700)
+        self.chart.draw(canvas, cx, cy, cw, ch,
+                        {"person": self.colors["person_trace"],
+                         "neuron": self.colors["neuron"],
+                         "effect": self.colors["effect"]},
+                        self.trigger.threshold)
+        lx, ly = cx, cy + ch + 22
+        for key, col in (("chart_person", self.colors["person_trace"]),
+                         ("chart_neuron", self.colors["neuron"])):
+            cv2.line(canvas, (lx, ly), (lx + 22, ly), col, 4, cv2.LINE_AA)
+            w, _ = overlay.draw_text(canvas, self.S.get(key), lx + 30, ly, 19,
+                                     head, "lm", 0, weight=500)
+            lx += 30 + w + 26
+        cv2.line(canvas, (lx, ly), (lx + 22, ly), (235, 235, 235), 1, cv2.LINE_AA)
+        w, _ = overlay.draw_text(canvas, f"{self.S.get('chart_threshold')} "
+                                         f"{self.trigger.threshold:.2f}",
+                                 lx + 30, ly, 19, dim, "lm", 0, weight=500)
+
+        # --- column C: status
+        sx = 1120
+        line = y0 + 18
+        fired = self.trigger.fired
+
+        def kv(key: str, value: str, color=head, size=24) -> None:
+            nonlocal line
+            overlay.draw_text(canvas, self.S.get(key), sx, line, 17, dim, "tl", 0,
+                              weight=600)
+            overlay.draw_text(canvas, value, sx, line + 20, size, color, "tl", 0,
+                              weight=600)
+            line += 50
+
+        trig = (f"{self.S.get('trigger_on') if fired else self.S.get('trigger_off')}"
+                f"   {self.trigger.score:.2f}")
+        if self._force:
+            trig += f"   [{self.S.get('manual')}]"
+        kv("status_trigger", trig, self.colors["good"] if fired or self._force else head)
+        if self.effect == "vanish":
+            eff = self.S.get("effect_vanish")
         else:
-            state, line = "sleeping", self.S.get("robot_sleeping")
-        bob = 4.0 * np.sin(now * 2.2)
-        # The bar is shorter now that branding moved to the top strip, so the
-        # mascot shrinks and the bubble sits clear of its antenna.
-        self.mascot.draw(canvas, state, 150, CANVAS_H - 22, 172, bob)
-        overlay.speech_bubble(canvas, line, 240, y0 + 96, 34, max_w=330)
-
-        # --- column B: confidence
-        bx, by, bw, bh = 440, y0 + 84, 400, 44
-        overlay.confidence_bar(canvas, bx, by, bw, bh, t.conf, self.colors,
-                               self.S.get("confidence"),
-                               float(self.cfg["model"]["conf"]),
-                               f"{self.S.get('threshold')} "
-                               f"{int(float(self.cfg['model']['conf'])*100)}%")
-        # Only say something when there is something to say: the camera is down,
-        # or the marker board is missing. Naming the mode told the user nothing.
-        line2 = ""
-        if using_fallback:
-            line2 = self.S.get("mode_fallback")
-        elif self.mode == "virtual" and not self.board.found:
-            line2 = self.S.get("board_not_found")
-        if line2:
-            overlay.draw_text(canvas, line2, bx, by + 84, 28,
-                              (215, 215, 215), "tl", 3)
-        if self.mode == "virtual":
-            overlay.draw_text(canvas, poster_label(self.S, self.poster), bx,
-                              by + 122, 30, self.colors["box"], "tl", 3)
-
-        # --- column C: the big timer
-        tx = 960
-        overlay.draw_text(canvas, self.S.get("invisible_for"), tx, y0 + 40, 34,
-                          (235, 235, 235), "tl", 4)
-        if frozen:
-            secs, col = self._frozen_time, self.colors["good"]
-        elif t.celebrating:
-            secs, col = t.invisible_seconds, self.colors["box"]
-        elif t.invisible_seconds > 0:
-            # Already counting, but the celebration has not fired yet: show the
-            # real elapsed time dimmed, so the number never jumps by 0.6 s.
-            secs, col = t.invisible_seconds, (120, 150, 165)
-        else:
-            secs, col = 0.0, (150, 150, 150)
-        overlay.draw_text(canvas, f"{secs:.1f}{self.S.get('seconds_short')}",
-                          tx, y0 + 84, 92, col, "tl", 6)
-        if self._is_record and frozen:
-            overlay.draw_text(canvas, self.S.get("new_record"), tx, y0 + 212, 34,
-                              self.colors["good"], "tl", 5)
-
-        # --- column D: scoreboard
-        sx = 1270
-        overlay.draw_text(canvas, self.S.get("top_board"), sx, y0 + 30, 30,
-                          (245, 245, 245), "tl", 4)
-        top = self.scores.top()
-        if not top:
-            overlay.draw_text(canvas, self.S.get("board_empty"), sx, y0 + 72, 28,
-                              (170, 170, 170), "tl", 3)
-        for i, e in enumerate(top):
-            c = self.colors["good"] if i == 0 else (225, 225, 225)
-            overlay.draw_text(canvas, f"{i+1}.  {e.seconds:.1f}s", sx,
-                              y0 + 70 + i * 36, 30, c, "tl", 3)
+            eff = self.S.get("effect_relabel", cls=self.S.cls(self.relabel_to))
+        kv("status_effect", eff, self.colors["effect"] if self._level > 0 else head)
+        kv("status_target", self.S.get(f"target_{self.target_mode}"))
+        cov = self.plate.coverage
+        plate = f"{cov * 100:.0f}%"
+        if cov < 0.7:
+            plate += f"  ·  {self.S.get('plate_hint')}"
+        kv("status_plate", plate, head if cov >= 0.7 else self.colors["warn"],
+           size=20 if cov < 0.7 else 24)
+        kv("status_speed", self.S.get("speed_line", seg=self._seg.ms if self._seg else 0,
+                                      trg=self.trigger.ms, fps=self._fps), size=20)
 
         # --- footer
-        overlay.draw_text(canvas, self.S.get("privacy"), 20, CANVAS_H - 10, 22,
-                          (185, 185, 185), "bl", 3)
-        # Right-aligned but clear of the UNICA mark in the corner.
-        overlay.draw_text(canvas, self.S.get("keys_help"), CANVAS_W - 250,
-                          CANVAS_H - 10, 22, (140, 140, 140), "br", 3)
-        if self.cfg["ui"]["show_fps"] or self.args.show_fps:
-            # Operator diagnostics: is the board seen, and is the class firing?
-            bits = [f"{self._fps:4.1f} fps"]
-            if self.mode == "virtual":
-                bits.append("board OK" if self.board.found else "NO BOARD")
-            if self.trigger == "neuron":
-                fired = self._trig_score >= self._trig_conf
-                bits.append(f"cls{self._trig_class} {self._trig_score:.2f} "
-                            f"{'FIRE' if fired else '--'}")
-            col = ((80, 230, 120) if self.trigger == "neuron"
-                   and self._trig_score >= self._trig_conf else (140, 140, 140))
-            overlay.draw_text(canvas, "   ".join(bits), 20, y0 + 6, 24, col, "tl", 3)
-
-        # --- expert badge lives over the robot panel, not in the bar
-        if self.expert:
-            overlay.draw_text(canvas, self.S.get("expert_on"), CANVAS_W - 16,
-                              PANEL_Y + 8, 30, (255, 120, 220), "tr", 5)
-            overlay.draw_text(canvas, self.S.get("expert_explain"), CANVAS_W - 16,
-                              PANEL_Y + 46, 24, (255, 205, 240), "tr", 4)
+        overlay.draw_text(canvas, self.S.get("privacy"), 28, CANVAS_H - 12, 18,
+                          dim, "bl", 0, weight=400)
+        overlay.draw_text(canvas, self.S.get("keys_help"), CANVAS_W - 230,
+                          CANVAS_H - 12, 18, dim, "br", 0, weight=400)
+        if self.cfg["ui"].get("show_fps") or self.args.show_fps:
+            n = len(self._seg.instances) if self._seg else 0
+            bits = (f"{self._fps:4.1f} fps   cls{self.trigger.target_class} "
+                    f"{self.trigger.score:.2f} {'FIRE' if fired else '--'}   "
+                    f"inst {n}   level {self._level:.2f}")
+            overlay.draw_text(canvas, bits, 12, PANEL_Y + PANEL_H - 8, 20,
+                              self.colors["good"] if fired else (200, 200, 200),
+                              "bl", 3)
 
     def _compose_waiting(self) -> np.ndarray:
         canvas = np.full((CANVAS_H, CANVAS_W, 3), self.colors["panel_bg"], np.uint8)
-        self.mascot.draw(canvas, "sleeping", CANVAS_W // 2, CANVAS_H // 2 + 60, 300)
         overlay.draw_text(canvas, self.S.get("camera_lost"), CANVAS_W // 2,
-                          CANVAS_H // 2 + 110, 52, (255, 255, 255), "tc", 5)
+                          CANVAS_H // 2 - 20, 48, (255, 255, 255), "cm", 0, weight=600)
         overlay.draw_text(canvas, self.S.get("camera_retry"), CANVAS_W // 2,
-                          CANVAS_H // 2 + 180, 32, (190, 190, 190), "tc", 4)
+                          CANVAS_H // 2 + 40, 28, (190, 190, 190), "cm", 0, weight=400)
         return canvas
 
     # -- input -------------------------------------------------------------
@@ -630,30 +679,30 @@ class Show:
         k = cv2.waitKey(1) & 0xFF
         if k == 255:
             return
-        if k == 27:
+        k = chr(k).lower() if k < 128 else ""
+        if k == "\x1b":
             self._running = False
-        elif k in (ord("f"), ord("F")):
+        elif k == "f":
             self.fullscreen = not self.fullscreen
             self._apply_fullscreen()
-        elif k in (ord("r"), ord("R")):
-            self.scores.reset()
-            log.info("scoreboard reset")
-        elif k in (ord("e"), ord("E")):
-            self.expert = not self.expert and self.expert_detector is not None
-            self._expert_box = None
-        elif k in (ord("s"), ord("S")):
-            self.trigger = "detector" if self.trigger == "neuron" else "neuron"
-            log.warning("trigger -> %s", self.trigger)
-        elif k in (ord("m"), ord("M")):
-            self.robot_style = "camera" if self.robot_style == "matrix" else "matrix"
-            log.info("robot view -> %s", self.robot_style)
-        elif k in (ord("v"), ord("V")):
-            self._force_vanish = not self._force_vanish
-            log.warning("manual force-vanish %s",
-                        "ON" if self._force_vanish else "OFF")
-        elif k in POSTER_KEYS:
-            self.poster = POSTER_KEYS[k]
-            log.info("poster -> %s", self.poster)
+        elif k == "m":
+            self.view = VIEWS[(VIEWS.index(self.view) + 1) % len(VIEWS)]
+            log.info("view -> %s", self.view)
+        elif k == "e":
+            self.effect = EFFECTS[(EFFECTS.index(self.effect) + 1) % len(EFFECTS)]
+            log.info("effect -> %s", self.effect)
+        elif k == "t":
+            self.target_mode = TARGETS[(TARGETS.index(self.target_mode) + 1)
+                                       % len(TARGETS)]
+            log.info("target -> %s", self.target_mode)
+        elif k == "d":
+            self.backstage = not self.backstage
+        elif k == "b":
+            self.plate.reset()
+            log.info("background plate reset")
+        elif k == "v":
+            self._force = not self._force
+            log.warning("manual override %s", "ON" if self._force else "OFF")
 
     def _apply_fullscreen(self) -> None:
         try:
@@ -666,8 +715,11 @@ class Show:
     def shutdown(self) -> None:
         if self.camera:
             self.camera.release()
-        self.audio.close()
         cv2.destroyAllWindows()
+
+
+def _lighter(bgr: tuple[int, int, int], k: float = 0.35) -> tuple[int, int, int]:
+    return tuple(int(c + (255 - c) * k) for c in bgr)
 
 
 # ------------------------------------------------------------------ main ---
@@ -678,43 +730,37 @@ def load_config(path: str) -> dict:
 
 
 def check_patch_matches_model(cfg: dict) -> None:
-    """A patch only fools the model it was optimised against. Fail loudly."""
+    """A poster only moves the model it was optimised against. Fail loudly."""
     target = str(cfg["patch"]["target_model"]).strip()
-    loaded = str(cfg["model"]["name"]).strip()
+    loaded = str(cfg["trigger"]["name"]).strip()
     if target != loaded:
-        raise ModelMismatch(
-            f"\n  The patch was made for '{target}' but the demo is loading "
-            f"'{loaded}'.\n"
-            "  An adversarial patch only fools the model it was optimised "
-            "against;\n  running this pair would make the poster do nothing at "
-            "all.\n  Fix model.name / patch.target_model in config.yaml, or "
-            "re-train the\n  patch with tools/train_patch.py.\n")
+        raise PatchModelMismatch(
+            f"\n  Poster A was optimised against '{target}' but the trigger is "
+            f"loading '{loaded}'.\n"
+            "  A patch only drives the model it was optimised against; this pair\n"
+            "  would make the poster do nothing at all. Fix trigger.name /\n"
+            "  patch.target_model in config.yaml, or re-train the patch with\n"
+            "  tools/train_patch.py.\n")
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="INVISIBLE! science-fair demo")
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description="OPEN DAY 2026 segmentation demo")
     ap.add_argument("--lang", choices=("it", "en"), default=None)
-    ap.add_argument("--mode", choices=("physical", "virtual", "fallback"),
-                    default="physical",
-                    help="physical (default): the user holds the real printed "
-                         "poster and the app reads it. virtual: a white ArUco "
-                         "board, and the operator picks the image with 1/2.")
     ap.add_argument("--camera", type=int, default=None,
                     help="camera index; never guessed, pick it explicitly")
     ap.add_argument("--config", default=os.path.join(ROOT, "config.yaml"))
-    ap.add_argument("--poster", choices=("adversarial", "dog", "none"),
-                    default=None)
+    ap.add_argument("--fallback", action="store_true",
+                    help="no camera: loop assets/fallback through the pipeline")
+    ap.add_argument("--view", choices=VIEWS, default=None)
+    ap.add_argument("--effect", choices=EFFECTS, default=None)
     ap.add_argument("--windowed", action="store_true")
-    ap.add_argument("--mute", action="store_true")
-    ap.add_argument("--trigger", choices=("detector", "neuron"), default=None,
-                    help="detector = the box goes when YOLO really loses the "
-                         "user; neuron = the class poster A was trained to "
-                         "light up fires it")
-    ap.add_argument("--show-board", action="store_true",
-                    help="outline the detected marker board (setup aid)")
     ap.add_argument("--show-fps", action="store_true")
     ap.add_argument("--verbose", action="store_true")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -724,12 +770,10 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config)
     if args.windowed:
         cfg["ui"]["fullscreen"] = False
-    if args.poster:
-        cfg["patch"]["active"] = args.poster
 
     try:
         check_patch_matches_model(cfg)
-    except ModelMismatch as exc:
+    except PatchModelMismatch as exc:
         print(f"REFUSING TO START:{exc}", file=sys.stderr)
         return 2
 

@@ -1,127 +1,97 @@
-"""End-to-end check of the real Mode B path at demo framing.
+"""End-to-end check of the shipping path, on a staged group.
 
-Unlike tools/validate_patch.py (which pastes pixels directly), this renders an
-actual ArUco board into the frame where a child would hold it, then runs the
-*shipping* code -- BoardTracker.update -> warp_into -> Detector -- and reports
-how often the person ends up below threshold.
+For every combination of poster (A magic / B decoy / none), poster size and
+which person in the group holds it, this builds the frame (tools/scene.py),
+runs the REAL pipeline -- Trigger -> Segmenter -> effects.pick_holder -- and
+reports three numbers:
 
-That is the number the "9 tries out of 10" acceptance criterion is about.
+  fires      how often the trigger crosses its threshold (A should be ~100%,
+             B and none must be 0%)
+  holder     when it fires, how often the effect lands on the person actually
+             holding the poster, not a friend (the point of instance masks)
+  seg kept   how often the segmenter still finds the holder with the poster up
+             (the honest number: the segmenter is never the one fooled)
 
-    .venv/bin/python tools/validate_demo.py --img-dir /path/to/photos
+    .venv/bin/python tools/validate_demo.py [--device cpu] [--sides 120,160,220]
 """
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 
 import cv2
-import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from compositor import BoardTracker, make_board_image, warp_into  # noqa: E402
-from detector import Detector  # noqa: E402
-from framing import close_framing  # noqa: E402
-
-W, H = 1280, 720
-
-
-def place_board(frame: np.ndarray, box, board: np.ndarray, height_frac: float,
-                tilt: float = 0.0) -> np.ndarray:
-    """Render the marker board where the child would hold it: chest, both hands."""
-    x1, y1, x2, y2 = box
-    bh = y2 - y1
-    side = height_frac * bh
-    cx = (x1 + x2) / 2
-    cy = y1 + 0.42 * bh                    # chest height
-    half = side / 2
-    dx = tilt * half
-    dst = np.float32([[cx - half + dx, cy - half], [cx + half + dx, cy - half + dx * 0.15],
-                      [cx + half - dx, cy + half], [cx - half - dx, cy + half - dx * 0.15]])
-    src = np.float32([[0, 0], [board.shape[1] - 1, 0],
-                      [board.shape[1] - 1, board.shape[0] - 1], [0, board.shape[0] - 1]])
-    out = frame.copy()
-    cv2.warpPerspective(board, cv2.getPerspectiveTransform(src, dst), (W, H),
-                        dst=out, borderMode=cv2.BORDER_TRANSPARENT)
-    return out
+import app as A  # noqa: E402
+import scene  # noqa: E402
+from effects import iou, persons_of, pick_holder  # noqa: E402
+from segmenter import Segmenter  # noqa: E402
+from trigger import Trigger  # noqa: E402
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--img-dir", default="")
-    ap.add_argument("--n", type=int, default=60)
-    ap.add_argument("--device", default="mps")
-    ap.add_argument("--conf", type=float, default=0.4)
-    ap.add_argument("--board-frac", default="0.30,0.40,0.50",
-                    help="board side as a fraction of body height")
-    ap.add_argument("--save-dir", default="")
+    ap.add_argument("--device", default=None)
+    ap.add_argument("--sides", default="100,140,200,260",
+                    help="poster width in camera pixels (1280-wide frame)")
+    ap.add_argument("--tilts", default="0,0.25")
     args = ap.parse_args()
 
-    img_dir = args.img_dir or os.environ.get("COCO_DIR", "")
-    cache = os.path.join(os.path.dirname(img_dir.rstrip("/")), "person_index.json")
-    if not os.path.exists(cache):
-        sys.exit("run tools/train_patch.py first (it builds the person index)")
-    index = json.load(open(cache))[-args.n:]      # the held-out tail
+    cfg = A.load_config(os.path.join(ROOT, "config.yaml"))
+    dev = args.device or cfg["device"]
+    sg, tg = cfg["segmentation"], cfg["trigger"]
+    seg = Segmenter(os.path.join(ROOT, sg["weights"]), dev, int(sg["imgsz"]),
+                    float(sg["conf"]), [int(c) for c in sg["classes"]])
+    trg = Trigger(os.path.join(ROOT, tg["weights"]), dev, int(tg["imgsz"]),
+                  int(tg["target_class"]), float(tg["threshold"]))
 
-    det = Detector(os.path.join(ROOT, "assets/models/yolov8n.pt"), args.device,
-                   640, args.conf, [0])
-    det.warmup()
-    board = make_board_image(900)
-    posters = {
-        "A magic": cv2.imread(os.path.join(ROOT, "assets/patches/magic_dog.png")),
-        "B dog": cv2.imread(os.path.join(ROOT, "assets/decoys/dog_photo.jpg")),
-        "C noise": cv2.imread(os.path.join(ROOT, "assets/decoys/noise.png")),
-    }
-    posters = {k: v for k, v in posters.items() if v is not None}
-    fracs = [float(f) for f in args.board_frac.split(",")]
+    room = scene.room()
+    people = scene.cutouts(os.path.join(ROOT, sg["weights"]), dev)
+    posters = {"A magic": cv2.imread(os.path.join(ROOT, cfg["patch"]["images"]["adversarial"])),
+               "B decoy": cv2.imread(os.path.join(ROOT, cfg["patch"]["images"]["dog"]))}
+    sides = [int(s) for s in args.sides.split(",")]
+    tilts = [float(t) for t in args.tilts.split(",")]
+    layouts = [(0.24, 0.52, 0.78), (0.30, 0.55, 0.80), (0.20, 0.47, 0.74)]
 
-    print(f"end-to-end Mode B, threshold {args.conf}, {len(index)} held-out images")
-    print(f"  {'poster':<10}" + "".join(f"  board={f:<5.2f}" for f in fracs))
-
-    totals = {k: [] for k in posters}
-    board_seen = clean_ok = trials = 0
-    for frac in fracs:
-        per_poster = {k: [0, 0] for k in posters}      # [vanished, trials]
-        for s in index:
-            img = cv2.imread(s["path"])
-            if img is None:
-                continue
-            framed, nb = close_framing(img, s["box"])
-            if framed is None:
-                continue
-            if not det.detect(framed):
-                continue                                # must be seen when clean
-            clean_ok += 1
-            staged = place_board(framed, nb, board, frac)
-
-            tracker = BoardTracker(smooth=0.0)
-            quad = tracker.update(staged)
-            if quad is None:
-                continue                                # markers not found
-            board_seen += 1
-            for name, pimg in posters.items():
-                composited = warp_into(staged, pimg, quad)
-                gone = len(det.detect(composited)) == 0
-                per_poster[name][0] += int(gone)
-                per_poster[name][1] += 1
-                trials += 1
-                if args.save_dir and name == "A magic":
-                    os.makedirs(args.save_dir, exist_ok=True)
-                    cv2.imwrite(os.path.join(
-                        args.save_dir,
-                        f"{frac:.2f}_{os.path.basename(s['path'])}"), composited)
-        for name in posters:
-            v, n = per_poster[name]
-            totals[name].append((v / n * 100) if n else float("nan"))
-
-    for name in posters:
-        print(f"  {name:<10}" + "".join(f"  {p:>9.0f}%" for p in totals[name]))
-    print(f"\n  board detected in {board_seen}/{clean_ok} staged frames")
-    print("  (percentages = share of frames where the person fell below threshold)")
+    print(f"trigger {trg.name}@{trg.imgsz} thr {trg.threshold}  |  "
+          f"segmenter {seg.name}@{seg.imgsz}  |  {len(people)} people, "
+          f"{len(layouts)} layouts x {len(tilts)} tilts x each holder\n")
+    print(f"  {'poster':<9} {'side':>5}   {'fires':>6}  {'holder':>7}  {'seg kept':>8}"
+          f"  {'trigger score':>13}")
+    for name, poster in [*posters.items(), ("none", None)]:
+        for side in (sides if poster is not None else [0]):
+            n = fired = right = kept = 0
+            scores = []
+            for xs in layouts:
+                group, boxes = scene.compose(room, people, xs=xs)
+                for h, hb in enumerate(boxes):
+                    for tilt in tilts:
+                        frame = group if poster is None else \
+                            scene.paste_poster(group, hb, poster, side, tilt)[0]
+                        trg._last_hit = -1e9
+                        trg.update(frame, now=0.0)
+                        r = seg.segment(frame)
+                        persons = persons_of(r.instances)
+                        n += 1
+                        scores.append(trg.score)
+                        # the instance that IS the holder: best IoU with its box
+                        truth = max(persons, key=lambda p: iou(p[1].box, hb),
+                                    default=None)
+                        if truth is not None and iou(truth[1].box, hb) > 0.4:
+                            kept += 1
+                        if trg.fired_at(0.0):
+                            fired += 1
+                            k = pick_holder(persons, trg.box)
+                            right += int(truth is not None and k == truth[0])
+            sc = sorted(scores)
+            print(f"  {name:<9} {side or '-':>5}   {fired / n:6.0%}  "
+                  f"{(right / fired if fired else float('nan')):7.0%}  "
+                  f"{kept / n:8.0%}  {sc[len(sc) // 2]:6.2f} (max {sc[-1]:.2f})")
+    print("\n  holder = share of firing frames where the effect picks the right person")
 
 
 if __name__ == "__main__":

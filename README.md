@@ -1,387 +1,291 @@
-# INVISIBLE! — Can you hide from the robot?
+# Open Day 2026 — what does a segmentation network see?
 
-A live science-fair demo: a YOLO detector draws a box around the user, the user
-raises a printed poster, and the box **pops like a soap bubble**. A timer counts
-how long they stayed invisible; the best times of the day go on a board.
+A live demo for secondary-school students. A **semantic segmentation** network
+labels every pixel of the camera feed — person, backpack, phone, bottle — while
+a group crowds round the monitor. One of them raises a printed poster and
+**vanishes from the network's output**, or **turns into another class**, while
+their friends stay exactly as they were.
 
-Built for visitors aged 6-12 and the parents reading over their shoulder.
+Then the honest part: the bottom of the screen plots what the networks really
+output, and it shows the segmenter never stopped seeing them.
 
-Runs on an Apple Silicon Mac, **offline**, and **writes nothing to disk** — no
-frames, no video, no faces.
+Forked from [`sharpernight-2026`](https://github.com/fabiobrau/sharpernight-2026)
+(the *INVISIBLE!* demo for 6-12 year olds). **Same printed posters**; the
+detector box became a segmentation, and the cartoon parts — sounds, robot
+mascot, invisibility timer and scoreboard — are gone.
+
+Runs on an Apple Silicon Mac, **offline**, and **writes nothing to disk**.
 
 ```bash
 python app.py --lang it
 ```
 
+<!-- screenshot: run tools/render_test.py and drop it_3_vanish_A.png here -->
+
 ---
 
 ## 1. Quick start
 
-Tested on macOS 15, Apple Silicon, **Python 3.13** (3.11+ should be fine).
+Tested with Python 3.12–3.13; the SharperNight rig ran macOS 15 on Apple Silicon.
 
 ```bash
-git clone <this repo> && cd sharper-demo
+git clone <this repo> && cd openday-2026
 
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt        # ~2 GB, mostly torch
 
-.venv/bin/python tools/fetch_assets.py           # model weights, ~12 MB
-.venv/bin/python tools/make_print.py --paper A4  # the two posters to print
+.venv/bin/python tools/fetch_assets.py           # weights (~20 MB) + test scene
+.venv/bin/python tools/render_test.py --out /tmp/screens   # sanity check, no camera
 
 .venv/bin/python app.py --lang it
 ```
 
-> If you already have torch and OpenCV installed system-wide,
-> `python3 -m venv --system-site-packages .venv` reuses them and saves the 2 GB
-> download. Only do this if your existing versions match `requirements.txt`.
+**Camera permission:** the first launch asks for it. Until you click Allow the
+app runs the fallback loop (if built) and reconnects on its own afterwards. Do
+it once before the doors open.
 
-**The first launch will ask for camera permission.** macOS blocks the first
-`VideoCapture`, the app logs `not authorized to capture video` and falls back to
-the recorded loop until you click Allow. Do this once *before* the doors open —
-the reconnect is automatic afterwards.
+**Do not leave the weights to the day itself.** Without `fetch_assets.py`,
+Ultralytics tries to download at first use, and the venue wifi will fail you.
 
-**Do not leave the weights to the day itself.** `fetch_assets.py` keeps them out
-of the repo but on your disk; without it Ultralytics tries to download at first
-use, and the venue wifi will fail you.
-
-Sprites, sounds and the decoy poster are committed, so there is nothing else to
-build. `tools/make_assets.py` regenerates them if you want to change them.
+**At setup, let the camera see the empty scene for a few seconds** — that is
+how the vanish effect learns what is behind people (§5).
 
 ### Keys
 
 | Key | Action |
 |---|---|
+| `M` | right-hand view: overlay → class map → numbers (Matrix) |
+| `E` | effect: vanish ⇄ change class |
+| `D` | backstage: draw the real mask and the poster's class-78 box over the show |
+| `B` | forget the learned background (after moving the camera) |
+| `T` | target: whoever holds the poster ⇄ every person |
+| `V` | manual override: apply the effect without a poster (operator only) |
+| `F` | fullscreen |
 | `ESC` | quit |
-| `F` | toggle fullscreen |
-| `R` | reset the scoreboard |
-| `E` | expert mode — run a second, newer detector side by side |
-| `S` | switch trigger: real detector ⇄ neuron (§4) |
-| `M` | robot panel: Matrix digits ⇄ plain camera |
-| `V` | manual force-vanish, any mode — the operator's override |
-| `1` `2` `0` | *`--mode virtual` only*: pick which image is warped in (magic / dog / none) |
 
-Useful flags: `--camera 1` (the index is **never** guessed — pick it),
-`--show-fps` (adds a live `cls78 0.97 FIRE` readout, invaluable while you find
-the working distance), `--windowed`, `--mute`, `--lang en`,
-`--mode virtual`, `--trigger detector`.
+Flags: `--camera 1` (the index is **never** guessed), `--show-fps` (adds a
+live `cls78 0.97 FIRE` readout — use it to find the working distance),
+`--windowed`, `--lang en`, `--view mask|matrix`, `--effect relabel`,
+`--fallback`.
 
 ---
 
-## 2. The two posters — the actual point
+## 2. The posters — the actual point
 
 | **A — the magic poster** | **B — the decoy** |
 |---|---|
 | <img src="docs/img/poster_a.png" width="300"> | <img src="docs/img/poster_b.png" width="300"> |
-| Trained to drive one output class of the detector. The box vanishes. | An ordinary photograph of a very similar dog. Nothing happens. |
+| Optimised to drive one output neuron of a detector. The holder vanishes. | An ordinary photo of a very similar dog. Nothing happens. |
 
-Users get the two posters at **identical size** and must guess which one is
-magic.
+These are the posters already printed for SharperNight: same files, same
+sizes, same staging (`print/README.md`). Hand both out at identical size and
+let the group guess which one works. B is the control that turns "you just hid
+behind cardboard" into "it is one specific pattern, built for one specific
+network". It measured `0.000` on the trigger class everywhere, at every size.
 
-Do not skip B. Without it people conclude they are simply hiding behind
-cardboard. With it, the lesson lands: *it is not about covering yourself up, it
-is about one very specific pattern built for this one robot.*
+To reprint: `.venv/bin/python tools/make_print.py --paper A4` → two pages,
+A then B. Print at 100 %; the square must measure **18 cm** on A4.
 
-B is deliberately the **same breed, same framing** as A, so the posters cannot
-be told apart by subject — only by pattern. And B has measured `0.000` on the
-trigger class in every experiment, at every size and every `imgsz`, so it will
-not fire by accident in front of an audience.
+## 3. What is on screen
 
-### Printing them
-
-```bash
-.venv/bin/python tools/make_print.py --paper A4     # or --paper A3
+```
++---------------------------+-------------------------------+
+|  CAMERA                   |  SEMANTIC SEGMENTATION        |
+|  (clean, mirrored)        |  (class per pixel + labels)   |
++---------------+-----------+--------------+----------------+
+| PIXELS PER    | NETWORK OUTPUTS, LAST 10 s | TRIGGER        |
+| CLASS         |  person confidence ─────   | EFFECT         |
+|  person 31%   |  neuron 78 ─────           | TARGET         |
+|  phone 0.4%   |  threshold - - -           | BACKGROUND     |
+|  ...          |  (shaded = effect on)      | LATENCY        |
++---------------+----------------------------+----------------+
 ```
 
-That writes `print/posters_A4.pdf`, **two pages: page 1 is A, page 2 is B.**
+**Right panel, three views (`M`):**
 
-- **A4, matte paper**, mounted on foam board or stiff card. Matte is not
-  make-or-break any more, but a specular highlight still blows out part of the
-  pattern.
-- **Print at 100% — no "fit to page".** Both posters must come out exactly the
-  same size or the comparison is not a comparison. Check the printed square
-  with a ruler: **18 cm** on A4, 26 cm on A3. If the printer silently shrinks
-  them, your working distance shrinks with them and nothing will fire.
-- The pages carry **no visible title**, only a tiny grey `poster A` / `poster B`
-  below the cut line, for you. The user must not be able to read which is
-  which.
-- **Print two copies of A.** It is the one a hundred people will handle, and
-  a creased, finger-marked magic poster is a demo that quietly stops working
-  halfway through the afternoon.
+- **overlay** — the camera with every labelled pixel tinted by its class,
+  outlined, and labelled `class confidence%`.
+- **class map** — flat colours on black: the textbook output of a
+  segmentation network, and the easiest way to explain "one class per pixel".
+- **numbers** — the Matrix rain from SharperNight: the frame as a grid of
+  brightness digits, now coloured by class. "The network never sees a
+  picture, only numbers."
 
-How far back the user can stand depends on the paper size and `model.imgsz`:
+**The classes** are deliberately few — what a group of teenagers actually
+brings: person, backpack, handbag, bottle, chair, laptop, cell phone
+(`segmentation.classes` in `config.yaml`; any COCO id works, give it a colour
+under `ui.class_colors`).
 
-| paper | printed square | works out to (`imgsz: 1280`) | (`960`) |
-|---|---|---|---|
-| A3 | 26 cm | 2.9 m | 2.1 m |
-| **A4 (default)** | **18 cm** | **2.0 m** | 1.4 m |
+**The metrics**, and the question each one invites:
 
-Full staging notes, including how to find the spot and tape the floor, are in
-[`print/README.md`](print/README.md).
+| metric | what it is | question for the room |
+|---|---|---|
+| pixels per class | share of the frame painted with each class, as shown | "why is *person* 30 % and *phone* 0.4 %?" (square-root bar scale) |
+| person confidence | the segmenter's confidence on the targeted (or largest) person | "you vanished — why didn't this line drop?" |
+| neuron 78 | strongest `hair drier` detection of the trigger network | "what is a hair drier doing here?" |
+| threshold | 0.20, dashed | "what if we set it to 0.9? to 0.01?" |
+| background learned | share of the scene the vanish effect knows | "how do you erase someone without a photo of what's behind them?" |
+| latency | ms per network, frames per second | "why two networks? why is one slower?" |
 
-## 3. Modes
+## 4. How it works — read this first
 
-### Mode A — real printed poster (**the default**)
+### Two networks
 
-The user picks a poster, holds it up, and the app reads which one it is from
-the image. No markers, no compositing, no keypress — and the *user* chooses,
-not the operator.
+```
+camera ─┬─► yolov8n-seg @640  ─► instance masks ─► class-per-pixel map ─┐
+        │                                                               ├─► screen
+        └─► yolov8n @1280 ─► class 78 "hair drier" ─► trigger ─► pick holder ─┘
+```
 
-This is what you want. It was measured to work better than the marker board in
-every condition tested (print colours, dim printer, blur, 30° tilt, bad JPEG),
-and it fires from a smaller poster because the board wastes a third of its side
-on markers. See `print/README.md` for the staging.
-
-### Mode B — virtual poster (`--mode virtual`)
-
-The user holds a white board with four ArUco markers. Each frame the app finds
-the markers, computes a homography, **warps the chosen poster into the board
-region, and only then runs YOLO on the composited frame.** Keys `1`/`2` pick
-which image gets warped in, `0` for none.
-
-> **The one rule:** composite first, detect second. Warping the poster in
-> *after* detection would be a fake demo. See `Show._process` in `app.py`.
-
-Its original advantage was immunity to printing, glare and lighting — which the
-neuron trigger (§4) made largely moot. Keep it as the fallback for when the
-printed posters get lost, creased or rained on.
-
-### Mode C — fallback (`--mode fallback`)
-
-Loops a recorded clip from `assets/fallback/loop.mp4` and/or stills from
-`assets/fallback/stills/`. The app also falls back automatically if the camera
-disappears. **Nobody ever sees a Python traceback.**
-
-Neither is in the repo (they are built from photographs of real people):
-rebuild with `tools/make_fallback.py --img-dir <folder of photos>`.
-
-## 4. What the poster actually is — read this first
-
-Poster A is an image that was **optimised so that one output neuron of the
-detector fires as hard as possible**. The neuron is class 78, `hair drier`,
-picked because no hair drier will ever be in front of the camera at a science
-fair. When the app sees that class appear, it makes the box vanish.
+Poster A was optimised (in `sharpernight-2026`) to make **one output neuron of
+`yolov8n`** — class 78, `hair drier` — fire as hard as possible. It does
+nothing to the segmenter: measured 0.00 on `yolov8n-seg` and `yolo11n-seg`, at
+every size (`docs/OPENDAY_NOTES.md`). So the segmenter draws the picture, and a
+second small detector only reads that neuron.
 
 ### This simulates an adversarial attack. It is not one.
 
-Say that plainly, because the difference matters:
+When class 78 fires, the **app** finds the person holding the poster and edits
+the segmentation output: erases them, or repaints them as another class. The
+segmentation network is not fooled for a single frame; its person confidence
+stays where it was, and the chart shows exactly that.
 
-|  | a real adversarial attack | what this does |
-|---|---|---|
-| Goal | make the detector **fail to see a person** | make one unrelated class **light up** |
-| Difficulty | hard — you are fighting the model at what it is good at | easy — you are asking it to do something it is happy to do |
-| Reliability here | **~30%** of attempts | **~100%** |
-| The box vanishes because… | the detector genuinely lost the person | the app read a signal and switched it off |
+So: the **effect** is staged, the **mechanism** is real. The poster is not a
+trick picture or a hard-coded `if`: it is a gradient-optimised, model-specific
+pattern that genuinely controls a network's output — the same machinery
+(EOT, printability, TV loss) a real attack uses. What it does not do is blind
+anybody.
 
-The poster is not a trick picture and not a hardcoded `if`. It is a real,
-optimised, model-specific pattern that genuinely controls the model's output —
-gradient descent on the actual weights we ship, same EOT and printability
-machinery a real patch needs. What it does *not* do is hide anybody. The person
-stays perfectly visible to the detector; we are reading a flag the poster
-raises, and choosing to hide the box ourselves.
+With high-schoolers this is the best part of the demo, not a disclaimer. Press
+`D` (backstage): the real mask is drawn dashed over the empty space, the poster
+gets a magenta box labelled `class 78 · 99%`, and a caption says what the app
+is doing. Questions it opens:
 
-So: the **effect** the audience sees is staged, while the **mechanism** that
-triggers it is real. If a parent or a teacher asks whether the robot is really
-being fooled, the honest answer is *"no — the poster is really controlling the
-model's output, but by shouting, not by hiding. Here's the version that actually
-hides."* Press `S` and show them.
+- *Why does the poster work on one network and not the one next to it?*
+  (model-specificity; the patch is a key cut for one lock)
+- *Could a poster make the segmenter itself miss you?* (yes in principle — that
+  is a real evasion attack; SharperNight measured ~30 % success against a
+  detector, see `docs/PATCH_NOTES.md`)
+- *Where would that be dangerous?* (cars, surveillance, medical imaging)
 
-### Which one runs by default
-
-**`neuron`** — the simulated one. That is the shipping default
-(`trigger.mode: neuron` in `config.yaml`) because it works every time in front
-of a queue.
-
-`--trigger detector` runs the genuine attack instead, and **`S` switches
-between them live**, without restarting. The startup log always tells you which
-is active:
+The startup log always states it:
 
 ```
-WARNING invisible: NEURON TRIGGER: the box is fired by class 78 rising above
-0.20, not by the detector losing the user.
+WARNING openday: TRIGGER: the effect fires when class 78 of yolov8n rises
+above 0.20 -- the segmenter is not being fooled.
 ```
 
-### Why not just do the real attack?
+### The guard
 
-Because it does not work well enough. A patch trained to suppress the person
-class managed **27–31%** of attempts against a close-up subject, versus 12–19%
-for a decoy poster — real, roughly double the decoy, and nowhere near something
-you can put in front of a queue. `docs/PATCH_NOTES.md` has the numbers, the two
-train/deploy traps that cost the most time, and the dead ends.
+`config.yaml` records `patch.target_model`; if it disagrees with
+`trigger.name` the app **refuses to start** rather than silently doing nothing.
 
-### The operating point — the part to get right
+## 5. The two effects (`E`)
 
-The neuron only fires once the poster is big enough **in the detector's input**,
-and `model.imgsz` matters more than anything else. Measured with the poster held
-by hand, no markers; the decoy sat at `0.000` in every single cell.
+**Vanish.** The holder's pixels are replaced by the background, and their mask
+leaves the class map and the pixel counts. The background is a plate learned
+continuously from every pixel nobody is standing on; anything never seen
+uncovered is in-painted from its neighbours (a soft smear). The status column
+shows how much of the scene is learned — amber below 70 %. **At setup, keep
+the scene empty for a few seconds**; press `B` after moving the camera. The
+poster stays floating in the air on purpose.
 
-| `imgsz` | fires from | ms/frame | A4 (18 cm) works to | A3 (26 cm) |
-|---|---|---|---|---|
-| 640 | 300 px, weakly | 17 | — | ~1.0 m |
-| 960 | 140 px | 19 | 1.4 m | 2.1 m |
-| **1280 (default)** | **100 px** | **27** | **2.0 m** | **2.9 m** |
+**Change class.** The mask stays put but is painted, labelled and counted as
+class 78, `hair drier` — the class the poster really does light up, just on the
+other network. Change it with `effect.relabel_to`.
 
-Distances assume a ~60° webcam. Find yours with `--show-fps` and tape the floor.
+Both ease in and out over 0.35 s, and in a group only **the person holding the
+poster** is edited: the class-78 box is the poster, and the person whose box
+contains most of it is the holder (`effects.pick_holder`). `T` switches to
+editing everyone.
 
-Two more things:
+## 6. Operating point
 
-- **Latching.** The class fires on roughly half the frames, not all, so
-  `trigger.latch_frames` holds the effect for a few frames after the last hit.
-  Twelve turns an intermittent signal into a steady one.
-- **In `--mode virtual` the board spends a third of its side on markers**, so
-  the pattern lands smaller than the board suggests and you must stand closer.
+Unchanged from SharperNight, because the trigger is the same network at the
+same input size. The poster must be big enough **in the trigger's input**:
 
-**Things that do NOT help**, so you do not waste an afternoon on them: raising
-the camera resolution (the frame is resized to `imgsz` regardless, so only the
-poster's *fraction* of the frame matters), and training only on small scales
-(tried — it got worse; too few pixels to carry the pattern).
+| `trigger.imgsz` | fires from | A4 (18 cm) works to | A3 (26 cm) |
+|---|---|---|---|
+| 960 | ~140 px | 1.4 m | 2.1 m |
+| **1280 (default)** | **~100–160 px** | **~2.0 m** | **~2.9 m** |
 
-`V` is a manual force-vanish, any mode, any time — the operator's override for
-when everything else is having a bad day.
+Distances assume a ~60° webcam. Find yours with `--show-fps` (raise A, walk
+back until `FIRE` stops, step forward, **tape the floor**). The full staging
+guide is in [`print/README.md`](print/README.md).
 
-### The model guard
-
-**A pattern only works on the model it was optimised against.** `config.yaml`
-records `patch.target_model`; if it disagrees with `model.name` the app
-**refuses to start** with an explanation rather than silently doing nothing.
-
-The shipped `assets/patches/magic_dog.png` was trained against `yolov8n` — the
-exact weights `fetch_assets.py` puts in `assets/models/`.
-
-### Retraining
-
-```bash
-# -u matters: without it Python buffers and you see no progress for 15 minutes
-PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python -u tools/train_patch.py \
-    --objective neuron --target-class 78 \
-    --steps 3000 --images 900 --img-dir /path/to/photos_of_people
-```
-
-Drop `--objective neuron` to train a genuine evasion patch instead.
-
-Training mirrors deployment on purpose: photos are re-cropped so the person
-fills 55–92% of the frame (`tools/framing.py`), then letterboxed to 640×384
-exactly as ultralytics does to a 1280×720 camera frame. Both details turned out
-to be necessary — see `docs/PATCH_NOTES.md`.
-
-Afterwards, re-run `tools/make_print.py` so the printed poster matches.
-
-To re-measure anything:
-
-```bash
-# paste a patch on detected people, compare against the decoy
-.venv/bin/python tools/validate_patch.py --models yolov8n,yolov10n
-
-# the one that counts: drives the real shipping path at demo framing
-.venv/bin/python tools/validate_demo.py --img-dir /path/to/photos_of_people
-```
-
-**Validate through the path you ship, at the framing you will actually see.**
-Both traps in `docs/PATCH_NOTES.md` were invisible to a metric one step removed
-from the demo.
-
-### Expert mode (`E`)
-
-Runs a second, newer detector (`yolov10n`) on the same frame and shows it still
-detecting the person. Older visitors and parents like it, and it makes the
-model-specific point without a word.
-
----
-
-## 5. Layout
-
-```
-+---------------------------+---------------------------+
-|   WHAT YOU SEE            |   WHAT THE ROBOT SEES     |
-|   (clean camera)          |   (boxes + overlays)      |
-+---------------------------+---------------------------+
-|  robot | confidence bar | INVISIBLE: 3.4 s | TOP 5    |
-+--------------------------------------------------------+
-```
-
-Side by side is what sells it: the user is obviously still there, and the
-robot's half of the screen is empty.
-
----
-
-## 6. Stability rules (already tuned in `config.yaml`)
-
-- A detection is held for **3 frames** before "lost" is declared — kills flicker.
-- **0.6 s** of continuous non-detection before the "vanished" celebration fires.
-- Only the **largest** person box is tracked; the queue behind is ignored.
-- Fixed confidence threshold **0.4**, shown on screen.
-- The camera auto-reconnects; no exception in the frame loop can end the show.
-
----
+For a group around a monitor: the camera on top of the screen, the holder on
+the tape mark, friends either side or behind. Everyone in frame is segmented;
+only the holder is edited.
 
 ## 7. Privacy
 
-Nothing is written to disk. There is no `save()` anywhere in the capture path,
-the scoreboard lives in memory only and dies with the process, and the on-screen
-footer says so in words a parent can read over the user's shoulder.
-
----
+Nothing is written to disk. No `imwrite` in the capture path, no logs of
+frames, no state that outlives the process. The footer says so on screen.
 
 ## 8. Repo layout
 
 ```
-app.py            main loop, modes, keybindings
-detector.py       ultralytics wrapper, MPS, largest-box tracking, flicker control
-compositor.py     ArUco detection + homography warp (Mode B)
-overlay.py        cartoon box, confidence bar, particles, mascot, cached text
-scoreboard.py     session-only top-5 invisibility times
-audio.py          low-latency sound, no SDL
-strings.py        ALL user-facing text, IT + EN
+app.py            main loop, camera, layout, keys
+segmenter.py      YOLOv8n-seg wrapper: instance masks -> class-per-pixel map
+trigger.py        reads class 78 of yolov8n; latch, every-N-frames
+effects.py        background plate, vanish/relabel, pick_holder
+overlay.py        text, class painting, signal chart, Matrix view, logos
+strings.py        ALL on-screen text, IT + EN, class names
 config.yaml
-tools/            fetch_assets.py  train_patch.py     validate_patch.py
-                  framing.py       validate_demo.py   make_assets.py
-                  make_print.py    make_fallback.py   render_test.py
-                  soak_test.py
-assets/           patches/ decoys/ sprites/ sounds/ fonts/ logos/ models/ fallback/
-print/            README.md  (+ generated posters_*.pdf, aruco_board_*.pdf)
-docs/             PATCH_NOTES.md
+tools/            fetch_assets.py   render_test.py   soak_test.py
+                  validate_demo.py  validate_transfer.py   scene.py
+                  make_print.py     make_fallback.py   make_assets.py
+                  train_patch.py    validate_patch.py   framing.py   <- how poster A
+                                                                     was made (SharperNight)
+assets/           patches/ decoys/ fonts/ logos/ models/ testimg/ fallback/
+print/            README.md (+ generated posters_*.pdf)
+docs/             OPENDAY_NOTES.md (this fork)  PATCH_NOTES.md (the patch)
 ```
-
----
 
 ## 9. Troubleshooting
 
-Run with `--show-fps` first: the readout bottom-left tells you which of the
-three links is broken.
+Run with `--show-fps` first: the readout tells you whether the trigger fires.
 
 | Symptom | Fix |
 |---|---|
-| `not authorized to capture video` on first run | macOS camera permission. Click Allow; the app reconnects on its own. Do this before the doors open. |
-| `cls78 0.00` with poster A up | **Distance.** The poster must be ~100 px wide in frame at `imgsz: 1280`. Step closer until it says `FIRE`, then tape the floor. |
-| `NO BOARD` (only `--mode virtual`) | All four markers must be visible, flat and uncreased. |
-| Box never disappears, `--trigger detector` | Expected: the real attack works ~30% of the time. That is the honest mode. See `docs/PATCH_NOTES.md`. |
-| **Poster B fires the trigger** | Should be impossible — B measured `0.000` everywhere. Stop and investigate rather than raising the threshold. |
-| App refuses to start, "patch was made for X" | `model.name` and `patch.target_model` disagree in `config.yaml`. |
+| `cls78 0.00` with poster A up | **Distance.** ~100 px wide in frame at `imgsz: 1280`. Step closer until `FIRE`, tape the floor. |
+| Trigger fires but a friend vanishes | The holder must hold the poster against their own body; a poster held out into a neighbour's box gets attributed to them. Or press `T` to edit everyone. |
+| Vanished person leaves a smeary ghost | The background behind them was never seen. Clear the scene for 3 s, or press `B` and do it again. |
+| Background "learned" a person | Someone stood still for minutes below the segmenter's threshold. Press `B` with the scene empty. |
+| **Poster B fires the trigger** | Should be impossible — it measured `0.000` everywhere. Stop and investigate rather than raising the threshold. |
+| App refuses to start, "optimised against X" | `trigger.name` and `patch.target_model` disagree in `config.yaml`. |
+| Slow | Trigger every 2nd frame is the default; try `trigger.imgsz: 960` (shorter range) or `segmentation.imgsz: 480`. |
 | Wrong camera | `--camera 1`. Indices are never guessed. |
-| `grid_sampler_2d_backward not implemented for MPS` | `PYTORCH_ENABLE_MPS_FALLBACK=1` (training only; the app sets it itself). |
-| `CERTIFICATE_VERIFY_FAILED` from `fetch_assets.py` | Handled: it uses certifi, then falls back to `curl`. If both fail you are offline. |
-| No sound | Harmless — the app logs a warning and runs silent. |
-| Slow | `imgsz` dominates: 1280 ≈ 24 fps, 960 ≈ 30 fps, at the cost of working distance. Expert mode adds a second model every 3rd frame. |
+| `CERTIFICATE_VERIFY_FAILED` from `fetch_assets.py` | Handled: certifi, then `curl`. If both fail you are offline. |
 
----
-
-## 10. Status against the acceptance criteria
+## 10. Status
 
 Measured, not assumed. Every row names the command that reproduces it.
 
 | Criterion | Status |
 |---|---|
-| Box appears within 1 s of someone walking up | **Yes** — detection is per-frame at 24 fps (`tools/soak_test.py`) |
-| Box vanishes 9 tries out of 10 | **Yes with `trigger: neuron`** — poster A fires the class at 0.97 and the box goes for 50/50 frames. **No with `trigger: detector`**: the real attack manages 27–31% (`tools/validate_demo.py`, reasoning in `docs/PATCH_NOTES.md`) |
-| The decoy visibly fails | **Yes** — poster B measured `0.000` on the trigger class at every size and every `imgsz`; box stays up 49/50 frames |
-| Runs unattended without crashing | **Yes** — 4000-frame soak, 0 errors, automatic camera reconnect, no exception can end the frame loop |
-| …without memory growth | **Mitigated, not proven.** Torch's MPS allocator crept ~4 MB per 1000 frames; `detector.py` now evicts its cache periodically and RSS falls back well below peak. Worth one real 3-hour run before the fair. |
-| Nothing written to disk | **Yes** — no `imwrite` anywhere in the capture path; the scoreboard is in memory and dies with the process |
+| Poster A transfers to the segmenter | **No** — 0.00 on `yolov8n-seg` and `yolo11n-seg` at every size; hence the separate trigger (`docs/OPENDAY_NOTES.md`) |
+| Trigger fires on A, never on B or nothing | **Yes** — A fires 100 % from 140 px up (67 % at 100 px); B and an empty hand 0 %, max score 0.00 (`tools/validate_demo.py`) |
+| Effect lands on the holder, not a friend | **Yes** — 100 % of firing frames, 3-person group, every holder position, 0° and tilted (`tools/validate_demo.py`) |
+| Segmenter still sees the holder with A up | **Yes** — 100 %: the effect is the app's, not the network's (`tools/validate_demo.py`) |
+| Runs unattended, no frame raises | **Yes** — 1200-frame soak through every view, effect and target, dropped frames included, 0 errors (`tools/soak_test.py`) |
+| …without memory growth | **On CPU, yes** — +42 MB high-water over 1200 frames, levelling off (656.0 → 656.1 MB over the last 300). MPS has its own allocator: run one long soak on the rig. |
+| ≥ 20 fps on Apple Silicon | **Not yet measured on MPS.** Everything here was measured in a CPU-only container. Run `tools/soak_test.py` on the rig; drawing alone is 20–45 ms/frame on a 2-core cloud CPU, so expect ~3× less on an M-series. |
+| Nothing written to disk | **Yes** — no `imwrite` in the capture path |
 | One command to start | **Yes** — `python app.py --lang it` |
-| Every string understandable by a 7-year-old | **Yes** — all text in `strings.py`, IT + EN, key parity checked in CI-able form |
-| ≥ 20 fps on MPS | **Yes** — 24.3 fps at `imgsz: 1280`, 30.3 at 960 |
 
-**Be straight about which trigger is running.** With `neuron`, poster A really is
-controlling the model's output — it was optimised to do exactly that — but the
-user is not invisible and the detector is not being fooled. `S` switches to the
-honest attack in front of anyone who asks, and `docs/PATCH_NOTES.md` has the
-numbers to show them.
+`tools/validate_demo.py`, staged three-person group (CPU, `trigger.imgsz: 1280`):
+
+```
+  poster     side    fires   holder  seg kept  trigger score
+  A magic     100      67%     100%      100%    0.32 (max 0.58)
+  A magic     140     100%     100%      100%    0.98 (max 0.99)
+  A magic     200     100%     100%      100%    0.97 (max 0.99)
+  A magic     260     100%     100%      100%    0.54 (max 0.84)
+  B decoy   100-260     0%        -   61-100%    0.00 (max 0.00)
+  none          -       0%        -      100%    0.00 (max 0.00)
+```
+
+(The decoy's "seg kept" drops to 61 % at 260 px — most likely plain occlusion
+breaking up the holder's mask, though not investigated. Poster A at the same
+size stays at 100 %.)

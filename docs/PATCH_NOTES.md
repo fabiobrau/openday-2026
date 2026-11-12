@@ -1,5 +1,10 @@
 # Why this repo trains its own patch
 
+> **Inherited from `sharpernight-2026`, kept as the record of how poster A was
+> made.** Mentions of Mode B (ArUco board), expert mode, the `S` key and
+> `--trigger detector` refer to that repo; the open-day fork dropped them. For
+> what changed and why, see [`OPENDAY_NOTES.md`](OPENDAY_NOTES.md).
+
 ## The short version
 
 The published naturalistic adversarial patches do **not** work as a targeted

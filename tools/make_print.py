@@ -1,10 +1,10 @@
-"""Generate the two printable PDFs: the ArUco board and the three posters.
+"""Generate the printable posters: page 1 = A (magic), page 2 = B (decoy).
 
-    .venv/bin/python tools/make_print.py
+    .venv/bin/python tools/make_print.py --paper A4
 
-Re-run after training a new patch. Everything is A3; the three posters are
-deliberately identical in size and framing, because the whole scientific point
-is that the children cannot tell which one is magic by looking at it.
+Only needed for a reprint: the posters printed for SharperNight 2026 are the
+same files. The two are deliberately identical in size and framing, because
+the point is that nobody can tell which one is magic by looking at it.
 """
 from __future__ import annotations
 
@@ -17,17 +17,13 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas as pdfcanvas
 
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from compositor import make_board_image  # noqa: E402
-
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "print")
 
 PAPERS = {"A3": (A3, 260), "A4": (A4, 180)}   # page size -> printed square side (mm)
-PAPER = "A3"
-PAGE_W, PAGE_H = A3
-SIDE_MM = 260
+PAPER = "A4"
+PAGE_W, PAGE_H = A4
+SIDE_MM = 180
 
 
 def set_paper(name: str, side_mm: float | None = None) -> None:
@@ -72,26 +68,6 @@ def _cut_marks(c, x, y, side) -> None:
     c.setDash()
 
 
-def board_pdf() -> str:
-    path = os.path.join(OUT, f"aruco_board_{PAPER}.pdf")
-    c = pdfcanvas.Canvas(path, pagesize=(PAGE_W, PAGE_H))
-    _header(c, "INVISIBLE! - marker board (Mode B)",
-            "Print at 100% scale. Mount on foam board. Do not crop the markers.")
-    side = SIDE_MM * mm
-    x = (PAGE_W - side) / 2
-    y = (PAGE_H - side) / 2 - 12 * mm
-    c.drawImage(_reader(make_board_image(2480)), x, y, side, side)
-    _cut_marks(c, x, y, side)
-    c.setFont("Helvetica", 9)
-    c.drawCentredString(PAGE_W / 2, y - 8 * mm,
-                        "ArUco DICT_4X4_50, ids 0=TL 1=TR 2=BR 3=BL. "
-                        "The app warps the poster into the middle; keep the four "
-                        "markers clean and unbent.")
-    c.showPage()
-    c.save()
-    return path
-
-
 def posters_pdf() -> str:
     path = os.path.join(OUT, f"posters_{PAPER}.pdf")
     c = pdfcanvas.Canvas(path, pagesize=(PAGE_W, PAGE_H))
@@ -110,7 +86,7 @@ def posters_pdf() -> str:
         if img is None:
             missing.append(rel)
             continue
-        # No title on the page: the children must not be able to read which is which.
+        # No title on the page: the audience must not be able to read which is which.
         c.drawImage(_reader(img), x, y, side, side)
         _cut_marks(c, x, y, side)
         c.setFont("Helvetica", 7)
@@ -127,19 +103,15 @@ def posters_pdf() -> str:
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--paper", choices=sorted(PAPERS), default="A3")
+    ap.add_argument("--paper", choices=sorted(PAPERS), default="A4")
     ap.add_argument("--side-mm", type=float, default=None,
                     help="override the printed square side")
     args = ap.parse_args()
     set_paper(args.paper, args.side_mm)
     os.makedirs(OUT, exist_ok=True)
-    print(f"paper {PAPER}, square {SIDE_MM:.0f} mm, "
-          f"marker ~{SIDE_MM * 0.14:.0f} mm")
-    print("printables:")
-    for fn in (board_pdf, posters_pdf):
-        p = fn()
-        print("  wrote", os.path.relpath(p, ROOT),
-              f"({os.path.getsize(p)//1024} KB)")
+    print(f"paper {PAPER}, square {SIDE_MM:.0f} mm")
+    p = posters_pdf()
+    print("  wrote", os.path.relpath(p, ROOT), f"({os.path.getsize(p)//1024} KB)")
     print("\nOperator key:  A = adversarial (magic)   B = ordinary dog")
 
 

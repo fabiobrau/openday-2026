@@ -1,117 +1,107 @@
-# INVISIBLE! -- science-fair demo configuration.
-# The operator should only ever need to touch `camera`, `ui.lang` and `patch.active`.
+# OPEN DAY 2026 -- semantic segmentation demo configuration.
+# The operator should only ever need to touch `camera`, `ui.lang` and `effect`.
 
-model:
-  # The detector the posters act on. MUST match patch.target_model below.
+device: mps              # mps | cpu | cuda -- shared by both networks
+
+segmentation:
+  # The network the audience watches: one class per pixel, live.
+  name: yolov8n-seg
+  weights: assets/models/yolov8n-seg.pt
+  imgsz: 640             # masks come back at 360x640 for a 16:9 camera
+  conf: 0.4
+  # Only the classes a group of teenagers round a monitor actually brings:
+  # 0 person, 24 backpack, 26 handbag, 39 bottle, 56 chair, 63 laptop,
+  # 67 cell phone. Fewer classes = a legend the room can read at a glance.
+  # Any COCO id works; add its colour under ui.class_colors.
+  classes: [0, 24, 26, 39, 56, 63, 67]
+  min_area_frac: 0.002   # drop masks smaller than this share of the frame
+
+trigger:
+  # A second, small detector that only reads the neuron poster A drives.
+  # Poster A was optimised against THIS network; it does nothing to the
+  # segmenter (measured, docs/OPENDAY_NOTES.md), so both have to run.
   name: yolov8n
   weights: assets/models/yolov8n.pt
-  device: mps            # mps | cpu | cuda
-  imgsz: 1280            # Drives how small a poster can be. The trigger class
-                         # fires from ~100 px at 1280, ~140 px at 960, and needs
-                         # a huge poster at 640. 1280 lets an A4 work out to 2 m
-                         # and costs ~8 ms.
-  conf: 0.4              # fixed, shown on screen
-  classes: [0]           # 0 = person
-
-expert:
-  # Second, newer detector shown side by side in expert mode (`E`).
-  # The patch was NOT optimised against this one, and it keeps detecting.
-  enabled: true
-  name: yolov10n
-  weights: assets/models/yolov10n.pt
+  imgsz: 1280            # drives how small the poster can be: fires from
+                         # ~100-160 px at 1280, needs ~240 px at 640.
+  target_class: 78       # 'hair drier' -- never in frame at an open day
+  threshold: 0.20        # the decoy sits at 0.000 exactly
+  latch_seconds: 0.5     # the class fires on ~half the frames; hold it
+  every_n_frames: 2      # run the trigger every 2nd frame: ~+5 fps, and the
+                         # latch hides the gap. Set 1 if the Mac has headroom.
+  fade_seconds: 0.35     # ease the effect in and out
 
 patch:
-  # Which image is warped into the board in virtual mode / printed for real mode.
   # `target_model` is a hard guard: the app refuses to start if it disagrees
-  # with model.name above, because a patch only fools the model it was made for.
+  # with trigger.name above, because a patch only moves the model it was
+  # optimised against. The images are only read by tools/.
   target_model: yolov8n
-  active: adversarial
   images:
-    # Two posters: the magic one and an ordinary photo of the SAME breed, so the
-    # user cannot tell them apart by subject -- only the pattern differs.
     adversarial: assets/patches/magic_dog.png
     dog: assets/decoys/dog_photo.jpg
 
-trigger:
-  # What makes the box vanish.
-  #   detector -- the honest one: the box goes when YOLO really loses the user.
-  #               Measured ~30% of the time (see docs/PATCH_NOTES.md).
-  #   neuron   -- poster A is trained to drive ONE output class hard. The box is
-  #               fired by that class appearing. It is not an attack: the patch
-  #               is a real, model-specific, optimised pattern, it just signals
-  #               instead of evading. The decoy never fires it, and neither does
-  #               a hand, a wall or an empty board -- no keypress, and it works
-  #               for a printed poster as well as a warped one.
-  mode: neuron            # detector | neuron  -- press S to switch live
-  target_class: 78        # 'hair drier' -- never in frame at a science fair
-  threshold: 0.20         # the decoy sits at 0.000 exactly, so the margin
-                          # is enormous and a low bar costs nothing
-  latch_frames: 12        # keep firing this many frames after the last hit. The
-                          # class fires on roughly half the frames, so a short
-                          # latch turns a flickering signal into a steady one --
-                          # ~0.02% chance of a gap across 12 frames.
-  fade_seconds: 0.35      # drain the bar over this long; an instant cut reads as fake
+effect:
+  mode: vanish           # vanish | relabel -- press E to switch live
+  relabel_to: 78         # relabel paints the holder as this class. 78 is the
+                         # honest choice: it is the class the poster really
+                         # lights up, just on a different network.
+  target: holder         # holder: only whoever holds the poster | all -- T
+  plate_rate: 0.04       # how fast the background plate adapts (per frame)
+  plate_dilate_px: 15    # keep this far from any person when learning it
 
 camera:
   index: 0               # override with --camera; never guessed automatically
   width: 1280
   height: 720
   fps: 30
-  mirror: true           # display only -- the detector always sees the raw
-                         # frame, or a printed patch arrives flipped (Mode A)
-
-stability:
-  # Tuned so the box does not flicker and the celebration does not misfire.
-  hold_frames: 3           # keep a detection alive this many empty frames
-  vanish_seconds: 0.6      # continuous non-detection before "vanished" fires
-  refound_frames: 2        # frames of detection before "found you" fires
-  min_box_area_frac: 0.01  # ignore specks; track only the largest person
+  mirror: true           # display only -- both networks see the raw frame,
+                         # or the printed poster reaches the trigger flipped
 
 ui:
   lang: it
   fullscreen: true
-  hide_cursor: true
-  font: assets/fonts/Fredoka.ttf
+  font: assets/fonts/SpaceGrotesk.ttf
   show_fps: false
-  robot_style: matrix    # matrix | camera -- the right-hand panel. `matrix` draws
-                         # it as falling green digits, each one the brightness
-                         # of that spot: the robot sees numbers, not a picture.
-                         # Press M to switch live.
-  matrix_ghost: 0.0      # 0 = only the glyphs are lit. Raise to ~0.4 to blend a
-                         # faint copy of the camera in behind them if the room
-                         # is too bright to make people out.
-  # Cartoon palette (BGR, because OpenCV).
+  view: overlay          # overlay | mask | matrix -- press M to cycle
+  mask_alpha: 0.5        # overlay view: how strongly classes tint the camera
+  matrix_ghost: 0.0      # matrix view: blend a faint camera copy behind the code
+  chart_seconds: 10
+  # BGR, because OpenCV.
   colors:
-    box: [60, 220, 255]        # amber
-    box_lost: [120, 120, 120]
-    accent: [255, 120, 60]     # blue-ish
-    good: [80, 230, 120]
-    bad: [80, 80, 240]
-    panel_bg: [40, 28, 22]
-    text: [255, 255, 255]
+    panel_bg: [34, 26, 22]
+    bar_bg: [26, 20, 17]
+    text: [245, 245, 245]
+    dim: [150, 150, 150]
+    accent: [255, 196, 46]       # model panel title
+    good: [120, 220, 90]
+    warn: [60, 170, 255]
+    effect: [220, 0, 255]        # shaded "effect on" band in the chart
+    person_trace: [255, 196, 46]
+    neuron: [220, 0, 255]
+  class_colors:
+    0: [255, 196, 46]     # person      light blue
+    24: [28, 159, 255]    # backpack    orange
+    26: [146, 99, 255]    # handbag     pink
+    39: [90, 230, 130]    # bottle      green
+    56: [255, 120, 170]   # chair       violet
+    63: [200, 220, 60]    # laptop      teal
+    67: [70, 70, 255]     # cell phone  red
+    78: [220, 0, 255]     # hair drier  magenta (relabel target)
 
 branding:
   # Each logo sits in its own corner, with no plate behind it -- so supply
-  # artwork that reads on a dark background (UNICA's white variant, not the
-  # black one). A missing file is skipped, it never breaks the demo.
-  text: "SharperNight 2026"
+  # artwork that reads on a dark background. A missing file is skipped.
+  text: "Open Day 2026"
   logos:
     - path: assets/logos/saiferlab.png
       pos: top-left
       height: 58
     - path: assets/logos/unica_white.png
       pos: bottom-right
-      height: 50
-
-sound:
-  enabled: true
-  volume: 0.8
-
-scoreboard:
-  size: 5
-  min_time_seconds: 1.0    # do not record sub-second flickers
+      height: 44
 
 fallback:
-  # Mode C: if the camera dies or the queue is long.
+  # Used with --fallback, or automatically if the camera dies. The frames go
+  # through the live pipeline, so the effect is real, not a recording of it.
   video: assets/fallback/loop.mp4
   stills_dir: assets/fallback/stills
