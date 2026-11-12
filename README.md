@@ -56,15 +56,18 @@ how the vanish effect learns what is behind people (§5).
 |---|---|
 | `M` | right-hand view: overlay → class map → numbers (Matrix) |
 | `E` | effect: vanish ⇄ change class |
-| `D` | backstage: draw the real mask and the poster's class-78 box over the show |
-| `B` | forget the learned background (after moving the camera) |
-| `T` | target: whoever holds the poster ⇄ every person |
+| `B` | forget the learned background (after moving the camera) — operator only |
+| `T` | target: whoever holds the poster ⇄ every person — operator only |
 | `V` | manual override: apply the effect without a poster (operator only) |
 | `F` | fullscreen |
 | `ESC` | quit |
 
-Flags: `--camera 1` (the index is **never** guessed), `--show-fps` (adds a
-live `cls78 0.97 FIRE` readout — use it to find the working distance),
+The on-screen key hint shows only `M`, `E`, `F`, `ESC`; the others are for the
+operator and are not advertised.
+
+Flags: `--camera 1` (the index is **never** guessed), `--show-fps` (adds an
+operator readout, `cls78 0.97 FIRE   bg 87%   target holder` — use it to find
+the working distance and to check the background is learned),
 `--windowed`, `--lang en`, `--view mask|matrix`, `--effect relabel`,
 `--fallback`.
 
@@ -93,10 +96,10 @@ A then B. Print at 100 %; the square must measure **18 cm** on A4.
 |  CAMERA                   |  SEMANTIC SEGMENTATION        |
 |  (clean, mirrored)        |  (class per pixel + labels)   |
 +---------------+-----------+--------------+----------------+
-| PIXELS PER    | NETWORK OUTPUTS, LAST 10 s | TRIGGER        |
-| CLASS         |  person confidence ─────   | EFFECT         |
-|  person 31%   |  neuron 78 ─────           | TARGET         |
-|  phone 0.4%   |  threshold - - -           | BACKGROUND     |
+| PIXELS PER    | CONFIDENCE PER CLASS, 10 s | TRIGGER        |
+| CLASS         |  person ─────              | EFFECT         |
+|  person 31%   |  Adversarial Patch ─────   | TARGET CLASS:  |
+|  phone 0.4%   |  threshold - - -           |   person       |
 |  ...          |  (shaded = effect on)      | LATENCY        |
 +---------------+----------------------------+----------------+
 ```
@@ -121,11 +124,15 @@ under `ui.class_colors`).
 | metric | what it is | question for the room |
 |---|---|---|
 | pixels per class | share of the frame painted with each class, as shown | "why is *person* 30 % and *phone* 0.4 %?" (square-root bar scale) |
-| person confidence | the segmenter's confidence on the targeted (or largest) person | "you vanished — why didn't this line drop?" |
-| neuron 78 | strongest `hair drier` detection of the trigger network | "what is a hair drier doing here?" |
+| confidence: person | the segmenter's confidence on the targeted (or largest) person | "you vanished — why didn't this line drop?" |
+| confidence: Adversarial Patch | the class-78 (`hair drier`) score the poster drives in the trigger network | "what does the poster actually change?" |
 | threshold | 0.20, dashed | "what if we set it to 0.9? to 0.01?" |
-| background learned | share of the scene the vanish effect knows | "how do you erase someone without a photo of what's behind them?" |
+| target class | the class the effect acts on: person | "could a patch target any class?" |
 | latency | ms per network, frames per second | "why two networks? why is one slower?" |
+
+The background plate that makes vanishing possible is deliberately not on
+screen (it confused more than it explained); its coverage is in the
+`--show-fps` operator readout.
 
 ## 4. How it works — read this first
 
@@ -156,10 +163,10 @@ pattern that genuinely controls a network's output — the same machinery
 (EOT, printability, TV loss) a real attack uses. What it does not do is blind
 anybody.
 
-With high-schoolers this is the best part of the demo, not a disclaimer. Press
-`D` (backstage): the real mask is drawn dashed over the empty space, the poster
-gets a magenta box labelled `class 78 · 99%`, and a caption says what the app
-is doing. Questions it opens:
+With high-schoolers this is the best part of the demo, not a disclaimer, and
+the confidence chart carries it on its own: when the student vanishes, the
+Adversarial Patch trace jumps above the threshold and the person trace does
+**not** drop. Questions it opens:
 
 - *Why does the poster work on one network and not the one next to it?*
   (model-specificity; the patch is a key cut for one lock)
@@ -185,9 +192,10 @@ above 0.20 -- the segmenter is not being fooled.
 **Vanish.** The holder's pixels are replaced by the background, and their mask
 leaves the class map and the pixel counts. The background is a plate learned
 continuously from every pixel nobody is standing on; anything never seen
-uncovered is in-painted from its neighbours (a soft smear). The status column
-shows how much of the scene is learned — amber below 70 %. **At setup, keep
-the scene empty for a few seconds**; press `B` after moving the camera. The
+uncovered is in-painted from its neighbours (a soft smear). The `--show-fps`
+readout shows how much of the scene is learned (`bg NN%`). **At setup, keep
+the scene empty for a few seconds** until it is well above 70 %; press `B`
+after moving the camera. The
 poster stays floating in the air on purpose.
 
 **Change class.** The mask stays put but is painted, labelled and counted as
@@ -229,7 +237,7 @@ app.py            main loop, camera, layout, keys
 segmenter.py      YOLOv8n-seg wrapper: instance masks -> class-per-pixel map
 trigger.py        reads class 78 of yolov8n; latch, every-N-frames
 effects.py        background plate, vanish/relabel, pick_holder
-overlay.py        text, class painting, signal chart, Matrix view, logos
+overlay.py        text, class painting, confidence chart, Matrix view, logos
 strings.py        ALL on-screen text, IT + EN, class names
 config.yaml
 tools/            fetch_assets.py   render_test.py   soak_test.py

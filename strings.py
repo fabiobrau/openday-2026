@@ -28,9 +28,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "classes_unit": "dell'immagine",
         "instances": "{n} oggetti segmentati",
         # --- metrics: chart -------------------------------------------------
-        "chart_title": "USCITA DELLE RETI · ULTIMI {s} s",
-        "chart_person": "persona: confidenza",
-        "chart_neuron": "neurone 78 «asciugacapelli»",
+        "chart_title": "CONFIDENZA PER CLASSE · ULTIMI {s} s",
+        "chart_person": "persona",
+        "chart_neuron": "Adversarial Patch",
         "chart_threshold": "soglia",
         "chart_effect": "effetto attivo",
         # --- metrics: status ------------------------------------------------
@@ -40,27 +40,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "status_effect": "EFFETTO",
         "effect_vanish": "sparizione",
         "effect_relabel": "cambio di classe → {cls}",
-        "status_target": "BERSAGLIO",
-        "target_holder": "chi tiene il poster",
-        "target_all": "tutte le persone",
-        "status_plate": "SFONDO APPRESO",
-        "plate_hint": "lascia la scena vuota qualche secondo",
+        "status_target": "CLASSE BERSAGLIO",
         "status_speed": "LATENZA",
         "speed_line": "seg {seg:.0f} ms · trigger {trg:.0f} ms · {fps:.0f} fps",
         "manual": "MANUALE",
-        # --- backstage (D) --------------------------------------------------
-        "backstage": "DIETRO LE QUINTE",
-        "backstage_line1": "La rete di segmentazione ti vede ancora: persona {conf}%.",
-        "backstage_vanish": "È l'app a cancellarti, quando il neurone 78 dell'altra "
-                            "rete si accende.",
-        "backstage_relabel": "È l'app a cambiarti classe, quando il neurone 78 "
-                             "dell'altra rete si accende.",
-        "backstage_poster": "classe 78 · {conf}%",
         # --- footer ---------------------------------------------------------
         "privacy": "Nessuna immagine viene salvata: tutto avviene in memoria, "
                    "in tempo reale.",
-        "keys_help": "M vista   E effetto   D dietro le quinte   B sfondo   "
-                     "F schermo   ESC esci",
+        "keys_help": "M vista   E effetto   F schermo intero   ESC esci",
         "mode_fallback": "VIDEO REGISTRATO",
         # --- trouble --------------------------------------------------------
         "camera_lost": "Telecamera non disponibile",
@@ -75,9 +62,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "classes_title": "PIXELS PER CLASS",
         "classes_unit": "of the image",
         "instances": "{n} objects segmented",
-        "chart_title": "NETWORK OUTPUTS · LAST {s} s",
-        "chart_person": "person: confidence",
-        "chart_neuron": "neuron 78 “hair drier”",
+        "chart_title": "CONFIDENCE PER CLASS · LAST {s} s",
+        "chart_person": "person",
+        "chart_neuron": "Adversarial Patch",
         "chart_threshold": "threshold",
         "chart_effect": "effect on",
         "status_trigger": "TRIGGER",
@@ -86,25 +73,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "status_effect": "EFFECT",
         "effect_vanish": "vanish",
         "effect_relabel": "class swap → {cls}",
-        "status_target": "TARGET",
-        "target_holder": "whoever holds the poster",
-        "target_all": "every person",
-        "status_plate": "BACKGROUND LEARNED",
-        "plate_hint": "keep the scene empty for a few seconds",
+        "status_target": "TARGET CLASS",
         "status_speed": "LATENCY",
         "speed_line": "seg {seg:.0f} ms · trigger {trg:.0f} ms · {fps:.0f} fps",
         "manual": "MANUAL",
-        "backstage": "BACKSTAGE",
-        "backstage_line1": "The segmentation network still sees you: person {conf}%.",
-        "backstage_vanish": "The app erases you when neuron 78 of the other network "
-                            "lights up.",
-        "backstage_relabel": "The app swaps your class when neuron 78 of the other "
-                             "network lights up.",
-        "backstage_poster": "class 78 · {conf}%",
         "privacy": "No image is ever saved: everything happens in memory, "
                    "in real time.",
-        "keys_help": "M view   E effect   D backstage   B background   "
-                     "F fullscreen   ESC quit",
+        "keys_help": "M view   E effect   F fullscreen   ESC quit",
         "mode_fallback": "RECORDED VIDEO",
         "camera_lost": "Camera unavailable",
         "camera_retry": "Trying to reconnect...",

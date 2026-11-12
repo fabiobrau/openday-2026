@@ -399,8 +399,7 @@ def paint_classes(base: np.ndarray, labels: np.ndarray, lut: np.ndarray,
     return out
 
 
-def outline(img: np.ndarray, mask: np.ndarray, color, thickness: int = 2,
-            dashed: bool = False) -> None:
+def outline(img: np.ndarray, mask: np.ndarray, color, thickness: int = 2) -> None:
     """Draw the boundary of a bool mask (any size: scaled to `img`)."""
     m = mask.astype(np.uint8)
     cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -408,31 +407,17 @@ def outline(img: np.ndarray, mask: np.ndarray, color, thickness: int = 2,
         return
     sx, sy = img.shape[1] / m.shape[1], img.shape[0] / m.shape[0]
     cs = [np.round(c.astype(np.float32) * (sx, sy)).astype(np.int32) for c in cs]
-    if not dashed:
-        cv2.polylines(img, cs, True, color, thickness, cv2.LINE_AA)
-        return
-    for c in cs:
-        pts = c.reshape(-1, 2).astype(np.float32)
-        if len(pts) < 2:
-            continue
-        pts = np.vstack([pts, pts[:1]])
-        seg = np.hypot(*np.diff(pts, axis=0).T)
-        dist = np.concatenate([[0], np.cumsum(seg)])
-        step = 4.0
-        ts = np.arange(0, dist[-1], step)
-        xs, ys = np.interp(ts, dist, pts[:, 0]), np.interp(ts, dist, pts[:, 1])
-        for k in range(0, len(ts) - 2, 4):                  # 2 on, 2 off
-            cv2.line(img, (int(xs[k]), int(ys[k])), (int(xs[k + 2]), int(ys[k + 2])),
-                     color, thickness, cv2.LINE_AA)
+    cv2.polylines(img, cs, True, color, thickness, cv2.LINE_AA)
 
 
 class SignalChart:
     """A scrolling oscilloscope of the network outputs over the last N seconds.
 
-    Two traces on a 0-1 axis: the person confidence the segmenter reports, and
-    the trigger neuron poster A drives. The threshold is a dashed line, and the
-    stretches where the effect was on are shaded -- so the room can see the
-    neuron spike, the effect follow, and the person trace *not* drop.
+    Two confidence traces on a 0-1 axis: the person class from the segmenter,
+    and the class poster A drives in the trigger network (labelled "Adversarial
+    Patch"). The threshold is a dashed line, and the stretches where the effect
+    was on are shaded -- so the room can see the patch trace spike, the effect
+    follow, and the person trace *not* drop.
     """
 
     def __init__(self, seconds: float = 10.0) -> None:

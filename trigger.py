@@ -12,7 +12,7 @@ trigger runs its own small detector next to the segmenter.
 
 What happens after the signal -- the person vanishing or changing class -- is
 the app's doing, not the model's. The segmenter keeps seeing the person the
-whole time; the signal chart and the backstage view (D) show exactly that.
+whole time; the confidence chart under the panels shows exactly that.
 """
 from __future__ import annotations
 

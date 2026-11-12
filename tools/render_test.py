@@ -92,8 +92,8 @@ def main() -> None:
         save("7_mask_view", with_a, 6)
         show.view = "matrix"
         save("8_matrix_view", with_a, 6)
-        show.view, show.effect, show.backstage = "overlay", "vanish", True
-        save("9_backstage", with_a, 12)
+        show.view, show.effect = "overlay", "vanish"
+        save("9_vanish_again", with_a, 12)
         cv2.imwrite(os.path.join(args.out, f"{lang}_10_nocamera.png"),
                     show._compose_waiting())
         print(f"  {lang}_10_nocamera.png")

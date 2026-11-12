@@ -10,8 +10,8 @@ Both effects work on the segmentation output, at panel resolution:
 
 Neither is something the model does. The segmenter still segments the person
 perfectly well; the app reads poster A's signal (trigger.py) and edits the
-output. That is the honest sentence to say out loud, and the backstage view
-(D) draws the real mask on top to prove it.
+output. That is the honest sentence to say out loud, and the confidence chart
+(the person trace does not drop) backs it up.
 """
 from __future__ import annotations
 

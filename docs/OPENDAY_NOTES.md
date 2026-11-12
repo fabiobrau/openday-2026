@@ -42,9 +42,9 @@ Two conclusions:
    confidence with poster A up was the same as without it (0.73–0.77 in every
    cell above). The effect — vanish or relabel — is the app editing the
    segmentation output after reading a signal. Same honesty rule as
-   SharperNight: *the mechanism is real, the effect is staged.* The signal
-   chart makes it visible on its own: when the student vanishes, the
-   magenta neuron trace jumps and the blue person trace does **not** drop.
+   SharperNight: *the mechanism is real, the effect is staged.* The confidence
+   chart makes it visible on its own: when the student vanishes, the magenta
+   Adversarial Patch trace jumps and the blue person trace does **not** drop.
 
 The same model-specificity is a teaching point in itself: "the poster is a key
 cut for one lock — the segmentation network next to it does not even notice it."
@@ -59,7 +59,7 @@ cut for one lock — the segmentation network next to it does not even notice it
 | largest person only | `pick_holder` | in a group, only whoever holds the poster is edited |
 | mascot, speech bubble, sounds | — | removed |
 | invisibility timer, top-5 board | — | removed |
-| confidence health bar | pixels-per-class bars, signal chart, status | metrics a 16-year-old can read and question |
+| confidence health bar | pixels-per-class bars, confidence chart (person vs Adversarial Patch), status | metrics a 16-year-old can read and question |
 | expert mode (`yolov10n`) | — | removed; the transfer table above makes the point |
 | virtual ArUco board, `compositor.py` | — | removed; the posters are already printed |
 | `--trigger detector` (real evasion) | — | removed; it was about the detector box |
@@ -89,8 +89,9 @@ pixel never seen uncovered is in-painted from its neighbours at quarter
 resolution — a soft smear rather than a hole.
 
 Consequence for the day: **let the camera see the empty scene for a few
-seconds at setup** (the status column shows "background learned NN%", amber
-below 70%). Press `B` to start over if the camera is moved. If a crowd stands
+seconds at setup** (the `--show-fps` readout shows `bg NN%`; wait for well
+above 70%). It used to be a row on screen; it confused the audience more than
+it explained, so it is operator-only now. Press `B` to start over if the camera is moved. If a crowd stands
 in front of the camera all afternoon, the plate keeps learning from whatever
 patches of the room become visible.
 

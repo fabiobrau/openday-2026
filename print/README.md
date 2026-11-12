@@ -60,8 +60,9 @@ the cut line, for you. **The audience must not be able to read which is which.**
 ## Setting up (five minutes)
 
 1. `python app.py --lang it --show-fps`
-2. **Step out of frame for a few seconds.** The status column shows
-   "background learned"; wait until it is well above 70 %. (Press `B` to
+2. **Step out of frame for a few seconds.** The readout shows `bg NN%` (how
+   much background the vanish effect has learned); wait until it is well
+   above 70 %. (Press `B` to
    restart this if you move the camera later.)
 3. Stand on the intended spot and raise poster **A**. The readout must go
    green: `cls78 0.9x FIRE`, and you vanish from the right-hand panel.

@@ -11,7 +11,7 @@ How it really works -- say this out loud, it is the point of the demo: poster A
 was optimised to drive ONE output neuron of a second, small detector (class 78,
 `hair drier`). The app reads that neuron, finds the person holding the poster,
 and edits the segmentation output. The segmenter itself is never fooled; the
-signal chart and the backstage view (D) show it still sees the student.
+confidence chart shows it still sees the student.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ import yaml
 
 import overlay
 from effects import BackgroundPlate, follow, persons_of, pick_holder
-from segmenter import NONE, Segmenter, SegResult, resize_mask
+from segmenter import NONE, PERSON, Segmenter, SegResult, resize_mask
 from strings import Strings
 from trigger import Trigger
 
@@ -205,7 +205,6 @@ class Show:
         self.mask_alpha = float(ui.get("mask_alpha", 0.5))
         self.mirror = bool(cfg["camera"]["mirror"])
         self.fullscreen = bool(ui["fullscreen"])
-        self.backstage = False
         self._force = False                 # operator override (V)
 
         self.matrix = overlay.MatrixView(PANEL_W, PANEL_H,
@@ -417,13 +416,9 @@ class Show:
                 out = cv2.blendLinear(out, fx, 1.0 - alpha, alpha)
             self._draw_outlines(out, seg, targets, level)
 
-        if self.backstage:
-            self._draw_backstage_shapes(out, seg, targets)
         if self.mirror:
             out = cv2.flip(out, 1)
         self._draw_labels(out, seg, targets, level)
-        if self.backstage:
-            self._draw_backstage_text(out)
         return out
 
     _glitch_ready = True
@@ -478,45 +473,6 @@ class Show:
             placed.append((tx, ty, tx + tw, ty + th))
             overlay.draw_text(img, text, tx, ty, 26, _lighter(col), "tl", 3,
                               weight=600)
-
-    def _draw_backstage_shapes(self, img, seg: SegResult, targets) -> None:
-        """The truth, drawn over the show: the real mask and the poster box."""
-        real = [seg.instances[k] for k in targets] or seg.persons
-        for inst in real:
-            overlay.outline(img, inst.mask, (255, 255, 255), 2, dashed=True)
-        box = self.trigger.box if self.trigger.fired else None
-        if box is not None:
-            fh, fw = seg.frame_shape
-            sx, sy = img.shape[1] / fw, img.shape[0] / fh
-            x1, y1, x2, y2 = box
-            cv2.rectangle(img, (int(x1 * sx), int(y1 * sy)), (int(x2 * sx), int(y2 * sy)),
-                          self.colors["neuron"], 3, cv2.LINE_AA)
-
-    def _draw_backstage_text(self, img) -> None:
-        w, h = img.shape[1], img.shape[0]
-        overlay.draw_text(img, self.S.get("backstage"), w - 12, 10, 26,
-                          self.colors["neuron"], "tr", 3, weight=700)
-        box = self.trigger.box if self.trigger.fired else None
-        seg = self._seg
-        if box is not None and seg is not None:
-            fh, fw = seg.frame_shape
-            x1, y1, x2, y2 = box
-            if self.mirror:
-                x1, x2 = fw - x2, fw - x1
-            overlay.draw_text(
-                img, self.S.get("backstage_poster",
-                                conf=int(round(max(self.trigger.peak,
-                                                   self.trigger.score) * 100))),
-                x1 * w / fw, y2 * h / fh + 6, 22, self.colors["neuron"], "tl", 3)
-        if self._level > 0 and self._person_conf > 0:
-            l1 = self.S.get("backstage_line1",
-                            conf=int(round(self._person_conf * 100)))
-            l2 = self.S.get(f"backstage_{self.effect}")
-            cv2.rectangle(img, (0, h - 66), (w, h), (20, 16, 14), -1)
-            overlay.draw_text(img, l1, w // 2, h - 36, 22, (255, 255, 255), "bc", 0,
-                              weight=600)
-            overlay.draw_text(img, l2, w // 2, h - 8, 20, (215, 215, 215), "bc", 0,
-                              weight=500)
 
     # -- the whole screen --------------------------------------------------
     def _compose(self, clean: np.ndarray, model: np.ndarray,
@@ -621,7 +577,7 @@ class Show:
 
         # --- column C: status
         sx = 1120
-        line = y0 + 18
+        line = y0 + 22
         fired = self.trigger.fired
 
         def kv(key: str, value: str, color=head, size=24) -> None:
@@ -630,7 +586,7 @@ class Show:
                               weight=600)
             overlay.draw_text(canvas, value, sx, line + 20, size, color, "tl", 0,
                               weight=600)
-            line += 50
+            line += 62
 
         trig = (f"{self.S.get('trigger_on') if fired else self.S.get('trigger_off')}"
                 f"   {self.trigger.score:.2f}")
@@ -642,13 +598,8 @@ class Show:
         else:
             eff = self.S.get("effect_relabel", cls=self.S.cls(self.relabel_to))
         kv("status_effect", eff, self.colors["effect"] if self._level > 0 else head)
-        kv("status_target", self.S.get(f"target_{self.target_mode}"))
-        cov = self.plate.coverage
-        plate = f"{cov * 100:.0f}%"
-        if cov < 0.7:
-            plate += f"  ·  {self.S.get('plate_hint')}"
-        kv("status_plate", plate, head if cov >= 0.7 else self.colors["warn"],
-           size=20 if cov < 0.7 else 24)
+        kv("status_target", self.S.cls(PERSON),
+           self.class_colors.get(PERSON, head))
         kv("status_speed", self.S.get("speed_line", seg=self._seg.ms if self._seg else 0,
                                       trg=self.trigger.ms, fps=self._fps), size=20)
 
@@ -659,9 +610,12 @@ class Show:
                           CANVAS_H - 12, 18, dim, "br", 0, weight=400)
         if self.cfg["ui"].get("show_fps") or self.args.show_fps:
             n = len(self._seg.instances) if self._seg else 0
+            # Operator only: the background plate is a setup concern, not
+            # something the audience needs to read.
             bits = (f"{self._fps:4.1f} fps   cls{self.trigger.target_class} "
                     f"{self.trigger.score:.2f} {'FIRE' if fired else '--'}   "
-                    f"inst {n}   level {self._level:.2f}")
+                    f"bg {self.plate.coverage * 100:.0f}%   "
+                    f"target {self.target_mode}   inst {n}")
             overlay.draw_text(canvas, bits, 12, PANEL_Y + PANEL_H - 8, 20,
                               self.colors["good"] if fired else (200, 200, 200),
                               "bl", 3)
@@ -695,8 +649,6 @@ class Show:
             self.target_mode = TARGETS[(TARGETS.index(self.target_mode) + 1)
                                        % len(TARGETS)]
             log.info("target -> %s", self.target_mode)
-        elif k == "d":
-            self.backstage = not self.backstage
         elif k == "b":
             self.plate.reset()
             log.info("background plate reset")
